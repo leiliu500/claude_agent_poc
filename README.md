@@ -104,6 +104,27 @@ analytics stage, and an executive `summary`.
 | `BEDROCK_REGION` | API region | Region for Bedrock runtime calls. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 
+## Changing the foundation model
+
+The model is `var.foundation_model` (currently `openai.gpt-oss-120b-1:0`; any Bedrock-Agents-capable
+model works — e.g. `anthropic.claude-3-5-sonnet-20240620-v1:0`). Agents use `prepare_agent = true`,
+so `terraform apply` recompiles each agent's DRAFT with the new model. The `live` **aliases** have
+`ignore_changes = [routing_configuration]` (the alias-update path is brittle for collaborator-bearing
+agents), so after the apply, cut fresh versions so the aliases serve the new model:
+
+```bash
+terraform apply -var "foundation_model=<new-model-id>"   # re-prepares all agents
+
+# Then re-version each agent's "live" alias (ids are in `terraform output`):
+for a in <supervisor-id>:<alias-id> <edd-id>:<alias-id> ... ; do
+  id=${a%%:*}; al=${a##*:}
+  aws bedrock-agent prepare-agent --agent-id "$id"
+  aws bedrock-agent update-agent-alias --agent-id "$id" --agent-alias-id "$al" --agent-alias-name live
+done
+```
+
+Verify: `aws bedrock-agent get-agent-version --agent-id <id> --agent-version <n> --query agentVersion.foundationModel`.
+
 ## Extending
 
 - **Add a use case:** add it to [`src/shared/usecases.ts`](src/shared/usecases.ts), add mock data,

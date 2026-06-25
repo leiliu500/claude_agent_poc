@@ -19,7 +19,7 @@ variable "environment" {
 variable "foundation_model" {
   description = "Bedrock foundation model id used by the agents and any flow prompt nodes."
   type        = string
-  default     = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+  default     = "openai.gpt-oss-120b-1:0"
 }
 
 variable "orchestration_mode" {

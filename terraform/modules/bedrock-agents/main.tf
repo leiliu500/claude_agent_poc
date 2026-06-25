@@ -49,7 +49,14 @@ resource "aws_bedrockagent_agent_alias" "collaborator" {
 
   agent_alias_name = "live"
   agent_id         = aws_bedrockagent_agent.collaborator[each.key].agent_id
-  description      = "Live alias for ${each.value.display_name} collaborator."
+  description = "Live alias for ${each.value.display_name} collaborator."
+
+  # The version "live" points to is set when the agent is (re)prepared (prepare_agent=true).
+  # Don't let Terraform revert the version or re-version on every apply (the alias UpdateAgentAlias
+  # path is brittle for collaborator-bearing agents). Model swaps re-version via the documented step.
+  lifecycle {
+    ignore_changes = [routing_configuration, description]
+  }
 
   # Ensure the action group is attached + agent prepared before aliasing.
   depends_on = [aws_bedrockagent_agent_action_group.collaborator]
@@ -66,8 +73,11 @@ resource "aws_bedrockagent_agent" "supervisor" {
   instruction                 = var.supervisor_instruction
   idle_session_ttl_in_seconds = var.idle_session_ttl_seconds
   agent_collaboration         = "SUPERVISOR"
-  # Prepared by the collaborator attachments below (re-prepared after links exist).
-  prepare_agent = false
+  # Prepare on create AND on update (e.g. foundation_model swap) so the DRAFT is recompiled;
+  # the collaborator links below also re-prepare it once they exist. Without this, a model
+  # change updates the DRAFT config but never recompiles it, so the alias keeps snapshotting
+  # the stale prepared artifact.
+  prepare_agent = true
   tags          = var.tags
 }
 
@@ -91,6 +101,12 @@ resource "aws_bedrockagent_agent_alias" "supervisor" {
   agent_alias_name = "live"
   agent_id         = aws_bedrockagent_agent.supervisor.agent_id
   description      = "Live alias for the supervisor agent."
+
+  # The flow invokes this alias; its version is set when the supervisor is (re)prepared.
+  # Ignore version/description churn so Terraform doesn't loop on the alias-update provider bug.
+  lifecycle {
+    ignore_changes = [routing_configuration, description]
+  }
 
   depends_on = [aws_bedrockagent_agent_collaborator.link]
   tags       = var.tags
