@@ -1,0 +1,83 @@
+/**
+ * Executes a single task against the (mock) backend and shapes a DispatchResult.
+ *
+ * Shared by:
+ *   - the action-group Lambdas (the agents call these), and
+ *   - the local orchestration mode in the API entrypoint.
+ *
+ * This is the deterministic "do the work" layer; the agents decide *which* work.
+ */
+import type { DispatchResult, TaskParams, TaskRequest } from "./types.js";
+import { getUseCase } from "./usecases.js";
+import { generateMock } from "../mock/data.js";
+
+export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
+  const start = hrMs();
+  const spec = getUseCase(task.useCase);
+  if (!spec) {
+    return {
+      type: task.type,
+      useCase: task.useCase,
+      status: "error",
+      data: [],
+      meta: {},
+      error: `Unknown use case '${task.useCase}'`,
+      latencyMs: hrMs() - start,
+    };
+  }
+  if (spec.type !== task.type) {
+    return {
+      type: task.type,
+      useCase: task.useCase,
+      status: "error",
+      data: [],
+      meta: {},
+      error: `Use case '${task.useCase}' belongs to type '${spec.type}', not '${task.type}'`,
+      latencyMs: hrMs() - start,
+    };
+  }
+  try {
+    const payload = generateMock(task.useCase, task.params);
+    return {
+      type: task.type,
+      useCase: task.useCase,
+      status: "ok",
+      data: payload.rows,
+      meta: { ...payload.meta, label: spec.label, exportable: spec.exportable },
+      latencyMs: hrMs() - start,
+    };
+  } catch (err) {
+    return {
+      type: task.type,
+      useCase: task.useCase,
+      status: "error",
+      data: [],
+      meta: {},
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: hrMs() - start,
+    };
+  }
+}
+
+/** Execute many tasks, preserving order. Orchestration entrypoint for the agent layer. */
+export async function executeTasks(tasks: TaskRequest[]): Promise<DispatchResult[]> {
+  // Independent tasks → run concurrently.
+  return Promise.all(tasks.map(executeTask));
+}
+
+/** Coerce loosely-typed agent/JSON params into our TaskParams shape. */
+export function coerceParams(raw: unknown): TaskParams {
+  if (!raw || typeof raw !== "object") return {};
+  const out: TaskParams = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (v === "true") out[k] = true;
+    else if (v === "false") out[k] = false;
+    else out[k] = v;
+  }
+  return out;
+}
+
+function hrMs(): number {
+  // performance.now is available in the Lambda Node 20 runtime.
+  return Math.round(performance.now());
+}

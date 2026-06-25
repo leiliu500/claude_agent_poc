@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and adjust.
+aws_region         = "us-east-1"
+project_name       = "bedrock-reporting"
+environment        = "dev"
+foundation_model   = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+orchestration_mode = "agent" # or "local" to bypass agents/flow
+log_level          = "info"
