@@ -1,0 +1,71 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "XShipReport Action Group",
+    "version": "1.0.0",
+    "description": "Run XShip institution / fee / waiver report use cases."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "runXShipReportUseCase",
+        "summary": "Execute an XShipReport use case and return its rows + metadata.",
+        "description": "Runs one XShipReport use case (institution, waiver, fee detail/summary/total, current quarter).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["useCase"],
+                "properties": {
+                  "useCase": {
+                    "type": "string",
+                    "description": "The XShipReport use case to execute.",
+                    "enum": [
+                      "xShipInstitution",
+                      "xShipWaiver",
+                      "xShipFeeDetail",
+                      "xShipFeeSummary",
+                      "xShipFee",
+                      "currentQuarter"
+                    ]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Extracted parameters.",
+                    "properties": {
+                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2." },
+                      "quarter": { "type": "string", "description": "Quarter override, e.g. 2026-Q2." },
+                      "institutionId": { "type": "string", "description": "Institution identifier." }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dispatch result for the XShipReport use case.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "useCase": { "type": "string" },
+                    "status": { "type": "string" },
+                    "data": { "type": "array", "items": { "type": "object" } },
+                    "meta": { "type": "object" },
+                    "latencyMs": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

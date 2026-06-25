@@ -1,0 +1,71 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "EDD Action Group",
+    "version": "1.0.0",
+    "description": "Run Enhanced Due-Diligence report use cases."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "runEddUseCase",
+        "summary": "Execute an EDD use case and return its rows + metadata.",
+        "description": "Runs one EDD use case (summary/detail, optionally exportable or internal) for a period/institution.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["useCase"],
+                "properties": {
+                  "useCase": {
+                    "type": "string",
+                    "description": "The EDD use case to execute.",
+                    "enum": [
+                      "eddSummaryReport",
+                      "eddExportSummaryReport",
+                      "eddDetailReport",
+                      "eddExportDetailReport",
+                      "eddExportDetailInternal"
+                    ]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Extracted parameters.",
+                    "properties": {
+                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2." },
+                      "institutionId": { "type": "string", "description": "Institution identifier." },
+                      "export": { "type": "boolean", "description": "Produce an exportable artifact." },
+                      "internal": { "type": "boolean", "description": "Include internal/confidential columns." }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dispatch result for the EDD use case.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "useCase": { "type": "string" },
+                    "status": { "type": "string" },
+                    "data": { "type": "array", "items": { "type": "object" } },
+                    "meta": { "type": "object" },
+                    "latencyMs": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

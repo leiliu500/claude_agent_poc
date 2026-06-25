@@ -1,0 +1,36 @@
+{
+  "name": "bedrock-agentic-reporting-system",
+  "version": "1.0.0",
+  "description": "Production AWS Bedrock agentic system: supervisor + collaborator agents + Bedrock Flow for routing, dispatch, orchestration, analytics and report generation across EDD / XShipReport / XShipDownload / Relationship use cases.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npm run clean && npm run typecheck && npm run build",
+    "synth:tf": "cd terraform && terraform fmt -recursive && terraform validate"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.620.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.620.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.140",
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "archiver": "^7.0.1",
+    "esbuild": "^0.23.0",
+    "eslint": "^8.57.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.3",
+    "vitest": "^2.0.0"
+  }
+}

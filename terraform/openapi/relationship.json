@@ -1,0 +1,63 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Relationship Action Group",
+    "version": "1.0.0",
+    "description": "Run ABA relationship lookup use cases from the XSHI file."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "runRelationshipUseCase",
+        "summary": "Execute a Relationship use case and return its rows + metadata.",
+        "description": "Runs one Relationship use case (ABA group or single ABA lookup).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["useCase"],
+                "properties": {
+                  "useCase": {
+                    "type": "string",
+                    "description": "The Relationship use case to execute.",
+                    "enum": ["xshiFileAbaGroup", "xshiFileAba"]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Extracted parameters.",
+                    "properties": {
+                      "abaNumber": { "type": "string", "description": "9-digit ABA routing number." },
+                      "abaGroup": { "type": "string", "description": "ABA group identifier." }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Dispatch result for the Relationship use case.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "useCase": { "type": "string" },
+                    "status": { "type": "string" },
+                    "data": { "type": "array", "items": { "type": "object" } },
+                    "meta": { "type": "object" },
+                    "latencyMs": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
