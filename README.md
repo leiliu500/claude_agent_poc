@@ -104,6 +104,26 @@ analytics stage, and an executive `summary`.
 | `BEDROCK_REGION` | API region | Region for Bedrock runtime calls. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
 
+## Changing the foundation model
+
+The model is `var.foundation_model` (currently `openai.gpt-oss-120b-1:0`; any Bedrock-Agents-capable
+model works — e.g. `anthropic.claude-3-5-sonnet-20240620-v1:0`). A swap is **one command**:
+
+```bash
+terraform apply -var "foundation_model=<new-model-id>"
+```
+
+Why it's not just an attribute change: an agent `live` **alias** serves a versioned snapshot of the
+*prepared* DRAFT, not the DRAFT config. So the apply does three things automatically:
+
+1. `prepare_agent = true` recompiles each agent's DRAFT with the new model.
+2. `terraform_data.{collaborator,supervisor}_reversion` (keyed on `foundation_model`) re-prepares each
+   agent and runs `update-agent-alias` so Bedrock cuts a fresh version — supervisor after collaborators.
+3. The aliases carry `ignore_changes = [routing_configuration]`, so Terraform never fights (or reverts)
+   the new version. These steps need the **AWS CLI on the apply host** (it shells out via `local-exec`).
+
+Verify: `aws bedrock-agent get-agent-version --agent-id <id> --agent-version <n> --query agentVersion.foundationModel`.
+
 ## Extending
 
 - **Add a use case:** add it to [`src/shared/usecases.ts`](src/shared/usecases.ts), add mock data,
