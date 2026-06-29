@@ -8,9 +8,11 @@ import { executeTasks } from "../shared/dispatch.js";
 import { runAnalytics } from "../shared/analytics.js";
 import { generateReport } from "../shared/report.js";
 import { parseSupervisorOutput, extractLastJsonObject } from "../shared/supervisor-parse.js";
+import { resolveEndpoint } from "../shared/usecases.js";
 import { makeActionGroupHandler } from "../shared/action-group.js";
 import { readFlowInputs } from "../shared/flow-io.js";
 import { handler as dispatchHandler } from "../lambdas/dispatch/handler.js";
+import { handler as processHandler } from "../lambdas/flow-process/handler.js";
 
 async function pipeline(question: string) {
   const decision = route(question);
@@ -114,6 +116,39 @@ describe("action-group handler (Bedrock contract)", () => {
   });
 });
 
+describe("endpoint resolution", () => {
+  it("fills the EDD summary path and query from params", () => {
+    const ep = resolveEndpoint("eddSummaryReport", {
+      officeId: "OFF1", userAba: "111111111", aba: "222222222", endpoint: "wire",
+      denomination: "USD", differenceType: "net", startDate: "2026-04-01", endDate: "2026-06-30",
+      pageNumber: 1, pageSize: 50, sortField: "riskScore", sortOrder: "desc",
+    })!;
+    expect(ep.method).toBe("GET");
+    expect(ep.path).toBe("/eddReport/summary/OFF1/111111111/222222222/wire/USD/net/2026-04-01/2026-06-30");
+    expect(ep.url).toContain("?pageNumber=1&pageSize=50&sortField=riskScore&sortOrder=desc");
+    expect(ep.missing).toHaveLength(0);
+  });
+
+  it("reports missing path params instead of dropping them", () => {
+    const ep = resolveEndpoint("eddDetailReport", {})!;
+    expect(ep.path).toBe("/eddReport/detail/{reportId}");
+    expect(ep.missing).toContain("reportId");
+  });
+
+  it("selects the XShip fee export path when an export is requested", () => {
+    const ep = resolveEndpoint("xShipFee", {
+      rollupAbaName: "ROLL", period: "2026-Q2", export: true,
+      formatType: "csv", reportName: "fees", aba: "333333333",
+    })!;
+    expect(ep.path).toBe("/csv/fees/ROLL/2026-Q2/333333333");
+  });
+
+  it("puts the relationship identifier on the query string", () => {
+    const ep = resolveEndpoint("xshiFileAba", { abaNumber: "123456789" })!;
+    expect(ep.url).toBe("/xshipRelationshipFile/xshipABA?abaNumber=123456789");
+  });
+});
+
 describe("flow input reader", () => {
   it("reads named inputs from the inputs[] array", () => {
     const inputs = readFlowInputs({
@@ -130,6 +165,21 @@ describe("flow input reader", () => {
   it("falls back to the single value when not an inputs[] array", () => {
     const inputs = readFlowInputs({ document: { a: 1 } });
     expect(inputs.single()).toEqual({ a: 1 });
+  });
+
+  it("reads the real Bedrock Flow shape: event.node.inputs", () => {
+    const inputs = readFlowInputs({
+      node: {
+        name: "Process",
+        inputs: [
+          { name: "question", expression: "$.data.question", value: "hello", type: "STRING" },
+          { name: "agentResponse", expression: "$.data", value: "{}", type: "STRING" },
+        ],
+      },
+      messageVersion: "1.0",
+    });
+    expect(inputs.get("question")).toBe("hello");
+    expect(inputs.get("agentResponse")).toBe("{}");
   });
 });
 
@@ -163,6 +213,44 @@ describe("dispatch flow node", () => {
     expect(out.type).toBe("EDD");
     expect(out.dispatchResults.length).toBeGreaterThan(0);
     expect(out.dispatchResults[0]!.status).toBe("ok");
+  });
+});
+
+describe("flow-process node (combined dispatch+analytics+report)", () => {
+  it("builds a full report from the supervisor's dispatchResults", async () => {
+    const agentResponse = JSON.stringify({
+      type: "EDD",
+      tasks: [],
+      dispatchResults: [
+        { type: "EDD", useCase: "eddSummaryReport", status: "ok", data: [{ riskScore: 10 }], meta: {}, latencyMs: 2 },
+      ],
+    });
+    const report = await processHandler({
+      inputs: [
+        { name: "question", value: "edd summary for 2026-Q2" },
+        { name: "agentResponse", value: agentResponse },
+      ],
+    });
+    expect(report.type).toBe("EDD");
+    expect(report.sections).toHaveLength(1);
+    expect(report.summary).toMatch(/Enhanced Due-Diligence/);
+  });
+
+  it("falls back to the local router when the agent output is unusable", async () => {
+    const report = await processHandler({
+      inputs: [
+        { name: "question", value: "XShip fee summary for 2026-Q2" },
+        { name: "agentResponse", value: "no json here" },
+      ],
+    });
+    expect(report.type).toBe("XShipReport");
+    expect(report.sections.length).toBeGreaterThan(0);
+  });
+
+  it("never throws and returns a valid report even on empty input", async () => {
+    const report = await processHandler({});
+    expect(report.reportId).toMatch(/^RPT-/);
+    expect(Array.isArray(report.sections)).toBe(true);
   });
 });
 

@@ -51,16 +51,18 @@ resource "aws_bedrockagent_flow" "this" {
       }
     }
 
-    # Bridge: parse the agent's structured output into DispatchResult[] (with fallback routing).
+    # Deterministic backbone: ONE Lambda node runs dispatch → analytics → report in-process and
+    # returns the FinalReport. Collapsing the former three-node chain removes the fragile
+    # inter-node object passing that left analytics/report inputs undefined.
     node {
-      name = "Dispatch"
+      name = "Process"
       type = "LambdaFunction"
       configuration {
         lambda_function {
-          lambda_arn = var.dispatch_lambda_arn
+          lambda_arn = var.process_lambda_arn
         }
       }
-      # Two inputs: the original question and the agent's response text.
+      # Two inputs: the original question and the supervisor agent's response text.
       input {
         name       = "question"
         type       = "String"
@@ -69,46 +71,6 @@ resource "aws_bedrockagent_flow" "this" {
       input {
         name       = "agentResponse"
         type       = "String"
-        expression = "$.data"
-      }
-      output {
-        name = "functionResponse"
-        type = "Object"
-      }
-    }
-
-    # Stage 1 — analytics over dispatchResults.
-    node {
-      name = "Analytics"
-      type = "LambdaFunction"
-      configuration {
-        lambda_function {
-          lambda_arn = var.analytics_lambda_arn
-        }
-      }
-      input {
-        name       = "codeHookInput"
-        type       = "Object"
-        expression = "$.data"
-      }
-      output {
-        name = "functionResponse"
-        type = "Object"
-      }
-    }
-
-    # Stage 2 — final report generation.
-    node {
-      name = "Report"
-      type = "LambdaFunction"
-      configuration {
-        lambda_function {
-          lambda_arn = var.report_lambda_arn
-        }
-      }
-      input {
-        name       = "codeHookInput"
-        type       = "Object"
         expression = "$.data"
       }
       output {
@@ -143,9 +105,9 @@ resource "aws_bedrockagent_flow" "this" {
     }
 
     connection {
-      name   = "InputToDispatch"
+      name   = "InputToProcess"
       source = "FlowInput"
-      target = "Dispatch"
+      target = "Process"
       type   = "Data"
       configuration {
         data {
@@ -156,9 +118,9 @@ resource "aws_bedrockagent_flow" "this" {
     }
 
     connection {
-      name   = "SupervisorToDispatch"
+      name   = "SupervisorToProcess"
       source = "Supervisor"
-      target = "Dispatch"
+      target = "Process"
       type   = "Data"
       configuration {
         data {
@@ -169,34 +131,8 @@ resource "aws_bedrockagent_flow" "this" {
     }
 
     connection {
-      name   = "DispatchToAnalytics"
-      source = "Dispatch"
-      target = "Analytics"
-      type   = "Data"
-      configuration {
-        data {
-          source_output = "functionResponse"
-          target_input  = "codeHookInput"
-        }
-      }
-    }
-
-    connection {
-      name   = "AnalyticsToReport"
-      source = "Analytics"
-      target = "Report"
-      type   = "Data"
-      configuration {
-        data {
-          source_output = "functionResponse"
-          target_input  = "codeHookInput"
-        }
-      }
-    }
-
-    connection {
-      name   = "ReportToOutput"
-      source = "Report"
+      name   = "ProcessToOutput"
+      source = "Process"
       target = "FlowOutput"
       type   = "Data"
       configuration {
@@ -211,6 +147,13 @@ resource "aws_bedrockagent_flow" "this" {
 
 data "aws_region" "current" {}
 
+locals {
+  # Changes whenever the flow wiring/topology changes, so a fresh immutable flow version is cut
+  # and the "live" alias advances to it. Bump `flow_topology_rev` on any node/connection edit.
+  flow_topology_rev    = "v2-process-node"
+  flow_definition_hash = sha1(join("|", [var.supervisor_alias_arn, var.process_lambda_arn, local.flow_topology_rev]))
+}
+
 # A Bedrock flow is created in status "NotPrepared". It must be PREPARED (the DRAFT compiled)
 # before a flow version can be cut — neither the aws nor awscc resource does this automatically.
 # This calls PrepareFlow and polls until the flow reaches "Prepared".
@@ -220,9 +163,8 @@ resource "terraform_data" "prepare_flow" {
   triggers_replace = [
     aws_bedrockagent_flow.this.id,
     var.supervisor_alias_arn,
-    var.dispatch_lambda_arn,
-    var.analytics_lambda_arn,
-    var.report_lambda_arn,
+    var.process_lambda_arn,
+    local.flow_definition_hash,
   ]
 
   provisioner "local-exec" {
@@ -246,8 +188,10 @@ resource "terraform_data" "prepare_flow" {
 # NOTE: CloudFormation FlowVersion is immutable — editing the flow definition requires a new
 # version. The prepare step above re-runs on wiring changes; bump `description` or taint to force one.
 resource "awscc_bedrock_flow_version" "this" {
-  flow_arn    = aws_bedrockagent_flow.this.arn
-  description = "Versioned snapshot managed by Terraform."
+  flow_arn = aws_bedrockagent_flow.this.arn
+  # Embed the definition hash so a wiring change forces a NEW immutable version (and the alias
+  # below advances to it). Without this, edits to the flow definition never reach the live alias.
+  description = "Versioned snapshot managed by Terraform (def ${local.flow_definition_hash})."
 
   depends_on = [terraform_data.prepare_flow]
 
@@ -268,12 +212,10 @@ resource "awscc_bedrock_flow_alias" "this" {
   tags = var.tags
 }
 
-# Allow Bedrock Flow to invoke the three pipeline Lambdas.
+# Allow Bedrock Flow to invoke the combined Process Lambda.
 resource "aws_lambda_permission" "flow_invoke" {
   for_each = {
-    dispatch  = var.dispatch_lambda_arn
-    analytics = var.analytics_lambda_arn
-    report    = var.report_lambda_arn
+    process = var.process_lambda_arn
   }
 
   statement_id  = "AllowBedrockFlowInvoke-${each.key}"

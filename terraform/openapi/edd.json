@@ -2,15 +2,15 @@
   "openapi": "3.0.0",
   "info": {
     "title": "EDD Action Group",
-    "version": "1.0.0",
-    "description": "Run Enhanced Due-Diligence report use cases."
+    "version": "1.1.0",
+    "description": "Run Enhanced Due-Diligence report use cases. The agent calls POST /run with { useCase, params }; the Lambda maps each use case to its backend REST endpoint:\n- eddSummaryReport: GET /eddReport/summary/{officeId}/{userAba}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}?pageNumber&pageSize&sortField&sortOrder\n- eddExportSummaryReport: GET /eddReport/exportsummary/{officeId}/{userAba}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}\n- eddDetailReport: GET /eddReport/detail/{reportId}\n- eddExportDetailReport: GET /eddReport/detail/{reportId}\n- eddExportDetailInternal: GET /eddReport/exportdetailinternal/{officeId}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}"
   },
   "paths": {
     "/run": {
       "post": {
         "operationId": "runEddUseCase",
         "summary": "Execute an EDD use case and return its rows + metadata.",
-        "description": "Runs one EDD use case (summary/detail, optionally exportable or internal) for a period/institution.",
+        "description": "Runs one EDD use case (summary/detail, optionally exportable or internal). Provide the params required by the chosen use case's endpoint.",
         "requestBody": {
           "required": true,
           "content": {
@@ -32,12 +32,22 @@
                   },
                   "params": {
                     "type": "object",
-                    "description": "Extracted parameters.",
+                    "description": "Extracted parameters. Which are required depends on the use case (see the operation description for the endpoint mapping).",
                     "properties": {
-                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2." },
-                      "institutionId": { "type": "string", "description": "Institution identifier." },
-                      "export": { "type": "boolean", "description": "Produce an exportable artifact." },
-                      "internal": { "type": "boolean", "description": "Include internal/confidential columns." }
+                      "officeId": { "type": "string", "description": "Office identifier (path segment for summary/export-summary/internal)." },
+                      "userAba": { "type": "string", "description": "Requesting user's ABA (summary / export-summary path segment)." },
+                      "aba": { "type": "string", "description": "Target ABA for the report (path segment)." },
+                      "endpoint": { "type": "string", "description": "Endpoint/channel segment for the EDD query." },
+                      "denomination": { "type": "string", "description": "Denomination filter (path segment)." },
+                      "differenceType": { "type": "string", "description": "Difference-type filter (path segment)." },
+                      "startDate": { "type": "string", "description": "Range start date, ISO yyyy-MM-dd." },
+                      "endDate": { "type": "string", "description": "Range end date, ISO yyyy-MM-dd." },
+                      "reportId": { "type": "string", "description": "Identifier of a prepared report (detail / export-detail)." },
+                      "pageNumber": { "type": "number", "description": "1-based page number (summary query)." },
+                      "pageSize": { "type": "number", "description": "Rows per page (summary query)." },
+                      "sortField": { "type": "string", "description": "Field to sort by (summary query)." },
+                      "sortOrder": { "type": "string", "description": "Sort direction: asc or desc (summary query)." },
+                      "internal": { "type": "boolean", "description": "Include internal/confidential columns (eddExportDetailInternal)." }
                     }
                   }
                 }

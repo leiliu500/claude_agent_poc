@@ -24,6 +24,7 @@ const QUARTER_RE = /\b(20\d{2})[ -]?q([1-4])\b/i;
 const ABA_RE = /\b(\d{9})\b/;
 const ZONE_RE = /\bzone[ -]?([a-z0-9]+)\b/i;
 const GROUP_RE = /\b(?:aba )?group[ -]?([a-z0-9]+)\b/i;
+const ISO_DATE_RE = /\b(20\d{2}-\d{2}-\d{2})\b/g;
 
 /** Pull structured params out of the raw question. */
 export function extractParams(question: string): TaskParams {
@@ -41,6 +42,15 @@ export function extractParams(question: string): TaskParams {
 
   const group = question.match(GROUP_RE);
   if (group) params.abaGroup = group[1];
+
+  // A pair of ISO dates → a date range. Mapped to both naming conventions (EDD: startDate/endDate,
+  // XShipReport: startDt/endDt) so either type's endpoint resolves in local mode.
+  const dates = question.match(ISO_DATE_RE);
+  if (dates && dates.length >= 1) {
+    params.startDate = params.startDt = dates[0];
+    const end = dates[1] ?? dates[0];
+    params.endDate = params.endDt = end;
+  }
 
   if (/\b(export|download|csv|extract|file)\b/.test(q)) params.export = true;
   if (/\b(internal|confidential)\b/.test(q)) params.internal = true;

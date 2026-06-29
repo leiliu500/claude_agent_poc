@@ -25,6 +25,7 @@ const LAMBDAS = [
   { name: "dispatch", entry: "src/lambdas/dispatch/handler.ts" },
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },
   { name: "report", entry: "src/lambdas/report/handler.ts" },
+  { name: "flow-process", entry: "src/lambdas/flow-process/handler.ts" },
 ];
 
 // AWS SDK v3 is provided by the Node 20 Lambda runtime — keep it external.

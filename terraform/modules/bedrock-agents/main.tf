@@ -49,7 +49,7 @@ resource "aws_bedrockagent_agent_alias" "collaborator" {
 
   agent_alias_name = "live"
   agent_id         = aws_bedrockagent_agent.collaborator[each.key].agent_id
-  description = "Live alias for ${each.value.display_name} collaborator."
+  description      = "Live alias for ${each.value.display_name} collaborator."
 
   # The version "live" points to is set when the agent is (re)prepared (prepare_agent=true).
   # Don't let Terraform revert the version or re-version on every apply (the alias UpdateAgentAlias
@@ -149,10 +149,13 @@ locals {
 resource "terraform_data" "collaborator_reversion" {
   for_each = var.collaborators
 
-  # Re-run only when the model changes (or the alias is recreated).
+  # Re-run when the model changes, the alias is recreated, OR the agent's instruction/action-group
+  # schema content changes — otherwise the re-prepared DRAFT never reaches the "live" alias version.
   triggers_replace = [
     var.foundation_model,
     aws_bedrockagent_agent_alias.collaborator[each.key].agent_alias_id,
+    sha1(each.value.instruction),
+    sha1(each.value.api_schema),
   ]
 
   provisioner "local-exec" {
@@ -170,6 +173,7 @@ resource "terraform_data" "supervisor_reversion" {
   triggers_replace = [
     var.foundation_model,
     aws_bedrockagent_agent_alias.supervisor.agent_alias_id,
+    sha1(var.supervisor_instruction),
   ]
 
   provisioner "local-exec" {

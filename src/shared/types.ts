@@ -29,6 +29,35 @@ export interface TaskParams {
   institutionId?: string;
   export?: boolean;
   internal?: boolean;
+
+  // EDD path/query params.
+  officeId?: string;
+  userAba?: string;
+  /** Target ABA used as an EDD/XShip-export path segment (distinct from the 9-digit abaNumber). */
+  aba?: string;
+  endpoint?: string;
+  denomination?: string;
+  differenceType?: string;
+  startDate?: string;
+  endDate?: string;
+  reportId?: string;
+  pageNumber?: number;
+  pageSize?: number;
+  sortField?: string;
+  sortOrder?: string;
+
+  // XShipReport path params.
+  rollupAbaName?: string;
+  startDt?: string;
+  endDt?: string;
+  denomType?: string;
+  formatType?: string;
+  reportName?: string;
+
+  // XShipDownload path params.
+  requestId?: string;
+  criteria?: string;
+
   [key: string]: unknown;
 }
 

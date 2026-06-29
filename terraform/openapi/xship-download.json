@@ -2,15 +2,15 @@
   "openapi": "3.0.0",
   "info": {
     "title": "XShipDownload Action Group",
-    "version": "1.0.0",
-    "description": "Run XShip activity download use cases."
+    "version": "1.1.0",
+    "description": "Run XShip activity download use cases. The agent calls POST /run with { useCase, params }; the Lambda maps each use case to its backend REST endpoint:\n- xshipDownloadActivityAba: GET /xshipdownload/activity/detail/{requestId}\n- xshipDownloadActivityAbaRollup: GET /xshipdownload/activity/detail/{requestId}\n- xshipDownloadActivityZone: GET /xshipdownload/activity/zone/{criteria}\n- xshipDownloadCriteriaPeriod: GET /xshipdownload/activity/criteria/{criteria}"
   },
   "paths": {
     "/run": {
       "post": {
         "operationId": "runXShipDownloadUseCase",
         "summary": "Execute an XShipDownload use case and return its rows + metadata.",
-        "description": "Runs one XShipDownload use case (activity by ABA/rollup/zone or criteria-by-period).",
+        "description": "Runs one XShipDownload use case. Activity-by-ABA and ABA-rollup take a prepared requestId; zone and criteria-by-period take an encoded criteria token.",
         "requestBody": {
           "required": true,
           "content": {
@@ -31,11 +31,10 @@
                   },
                   "params": {
                     "type": "object",
-                    "description": "Extracted parameters.",
+                    "description": "Extracted parameters. Which are required depends on the use case (see the operation description for the endpoint mapping).",
                     "properties": {
-                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2." },
-                      "abaNumber": { "type": "string", "description": "9-digit ABA routing number." },
-                      "zone": { "type": "string", "description": "Activity zone code." }
+                      "requestId": { "type": "string", "description": "Prepared activity-download request identifier (detail path segment, for ActivityAba/ActivityAbaRollup)." },
+                      "criteria": { "type": "string", "description": "Encoded activity criteria token (zone / criteria-period path segment)." }
                     }
                   }
                 }

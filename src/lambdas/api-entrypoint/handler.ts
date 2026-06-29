@@ -82,10 +82,14 @@ async function produceReport(question: string): Promise<FinalReport> {
     return runLocal(question);
   }
 
+  // Bound the flow wait so a slow multi-agent dispatch degrades to the local pipeline within the
+  // synchronous HTTP deadline (API Gateway HTTP APIs hard-cap at 30s) instead of returning 503.
+  const timeoutMs = Number(process.env.FLOW_TIMEOUT_MS ?? "24000");
+
   try {
-    return await invokeFlow({ flowId, flowAliasId, question });
+    return await invokeFlow({ flowId, flowAliasId, question, timeoutMs });
   } catch (err) {
-    log.warn("flow invocation failed; falling back to local pipeline", { error: String(err) });
+    log.warn("flow invocation failed or timed out; falling back to local pipeline", { error: String(err) });
     return runLocal(question);
   }
 }

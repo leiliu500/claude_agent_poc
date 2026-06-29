@@ -8,7 +8,7 @@
  * This is the deterministic "do the work" layer; the agents decide *which* work.
  */
 import type { DispatchResult, TaskParams, TaskRequest } from "./types.js";
-import { getUseCase } from "./usecases.js";
+import { getUseCase, resolveEndpoint } from "./usecases.js";
 import { generateMock } from "../mock/data.js";
 
 export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
@@ -38,12 +38,26 @@ export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
   }
   try {
     const payload = generateMock(task.useCase, task.params);
+    // Resolve the exact backend REST endpoint this use case maps to. A real client would call
+    // `endpoint.method endpoint.url`; the mock layer stands in for that call today.
+    const endpoint = resolveEndpoint(task.useCase, task.params);
     return {
       type: task.type,
       useCase: task.useCase,
       status: "ok",
       data: payload.rows,
-      meta: { ...payload.meta, label: spec.label, exportable: spec.exportable },
+      meta: {
+        ...payload.meta,
+        label: spec.label,
+        exportable: spec.exportable,
+        ...(endpoint
+          ? {
+              endpoint: endpoint.url,
+              httpMethod: endpoint.method,
+              ...(endpoint.missing.length ? { endpointMissingParams: endpoint.missing } : {}),
+            }
+          : {}),
+      },
       latencyMs: hrMs() - start,
     };
   } catch (err) {
