@@ -74,6 +74,14 @@ module "lambda_workers" {
       memory_size = var.lambda_memory_mb
       description = "Flow node: final report generation."
     }
+    "flow-process" = {
+      zip_path    = "${var.dist_dir}/flow-process.zip"
+      role_arn    = module.iam.lambda_basic_role_arn
+      environment = { LOG_LEVEL = var.log_level }
+      timeout     = var.lambda_timeout_seconds
+      memory_size = var.lambda_memory_mb
+      description = "Flow node: combined dispatch+analytics+report."
+    }
   }
 }
 
@@ -98,9 +106,7 @@ module "bedrock_flow" {
   name_prefix          = local.name_prefix
   flow_role_arn        = module.iam.bedrock_flow_role_arn
   supervisor_alias_arn = module.bedrock_agents.supervisor_agent_alias_arn
-  dispatch_lambda_arn  = module.lambda_workers.function_arns["dispatch"]
-  analytics_lambda_arn = module.lambda_workers.function_arns["analytics"]
-  report_lambda_arn    = module.lambda_workers.function_arns["report"]
+  process_lambda_arn   = module.lambda_workers.function_arns["flow-process"]
   tags                 = local.common_tags
 }
 
@@ -124,6 +130,9 @@ module "lambda_entrypoint" {
         BEDROCK_REGION     = local.region
         FLOW_ID            = module.bedrock_flow.flow_id
         FLOW_ALIAS_ID      = module.bedrock_flow.flow_alias_id
+        # Bound the synchronous flow wait so a slow agent dispatch falls back to local within
+        # API Gateway's 30s cap. Raise/lower per environment; the agent path still runs server-side.
+        FLOW_TIMEOUT_MS = "24000"
       }
       timeout     = 60
       memory_size = var.lambda_memory_mb

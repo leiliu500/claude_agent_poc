@@ -18,8 +18,14 @@ export function readFlowInputs(event: unknown): FlowInputs {
   const map: Record<string, unknown> = {};
   let single: unknown = e;
 
-  if (Array.isArray(e.inputs)) {
-    for (const item of e.inputs as Array<Record<string, unknown>>) {
+  // Bedrock Flow Lambda nodes deliver inputs at `event.node.inputs` (each already resolved to a
+  // `value`). Older/test shapes use a top-level `inputs` array. Support both.
+  const node = e.node as Record<string, unknown> | undefined;
+  const inputArr =
+    node && Array.isArray(node.inputs) ? node.inputs : Array.isArray(e.inputs) ? e.inputs : undefined;
+
+  if (inputArr) {
+    for (const item of inputArr as Array<Record<string, unknown>>) {
       if (item && typeof item.name === "string") map[item.name] = item.value;
     }
     const vals = Object.values(map);

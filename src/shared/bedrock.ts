@@ -65,6 +65,8 @@ export async function invokeFlow(args: {
   flowId: string;
   flowAliasId: string;
   question: string;
+  /** Abort the flow wait after this many ms so the caller can fall back within its own deadline. */
+  timeoutMs?: number;
 }): Promise<FinalReport> {
   const cmd = new InvokeFlowCommand({
     flowIdentifier: args.flowId,
@@ -78,8 +80,12 @@ export async function invokeFlow(args: {
     ],
   });
 
+  // The supervisor's multi-agent dispatch can exceed the synchronous HTTP deadline. Bound the
+  // wait so the entrypoint can degrade to the local pipeline before API Gateway's 30s cap.
+  const abortSignal = args.timeoutMs ? AbortSignal.timeout(args.timeoutMs) : undefined;
+
   try {
-    const resp = await client().send(cmd);
+    const resp = await client().send(cmd, abortSignal ? { abortSignal } : {});
     if (!resp.responseStream) throw new UpstreamError("Flow returned no response stream");
     let doc: unknown;
     for await (const event of resp.responseStream) {

@@ -2,15 +2,15 @@
   "openapi": "3.0.0",
   "info": {
     "title": "XShipReport Action Group",
-    "version": "1.0.0",
-    "description": "Run XShip institution / fee / waiver report use cases."
+    "version": "1.1.0",
+    "description": "Run XShip institution / fee / waiver report use cases. The agent calls POST /run with { useCase, params }; the Lambda maps each use case to its backend REST endpoint:\n- xShipInstitution: GET /xshipreport/view/XShipInstitution/{rollupAbaName}/{period}\n- xShipWaiver: GET /xshipreport/view/XShipWaiver/{rollupAbaName}/{period}\n- xShipFeeDetail: GET /xshipreport/view/XShipFeeDetail/{rollupAbaName}/{zone}/{period}/{startDt}/{endDt}/{denomType}  (export: /{formatType}/{reportName}/{rollupAbaName}/{zone}/{period}/{startDt}/{endDt}/{denomType}/{aba})\n- xShipFeeSummary: GET /xshipreport/view/XShipFeeSummary/{rollupAbaName}/{zone}/{period}/{denomType}  (export: /{formatType}/{reportName}/{rollupAbaName}/{zone}/{period}/{denomType}/{aba})\n- xShipFee: GET /xshipreport/view/XShipFee/{rollupAbaName}/{period}  (export: /{formatType}/{reportName}/{rollupAbaName}/{period}/{aba})\n- currentQuarter: GET /xshipreport/view/currentQuarter"
   },
   "paths": {
     "/run": {
       "post": {
         "operationId": "runXShipReportUseCase",
         "summary": "Execute an XShipReport use case and return its rows + metadata.",
-        "description": "Runs one XShipReport use case (institution, waiver, fee detail/summary/total, current quarter).",
+        "description": "Runs one XShipReport use case. Provide the params required by the chosen use case's endpoint; supply formatType/reportName/aba to request an export artifact for the fee use cases.",
         "requestBody": {
           "required": true,
           "content": {
@@ -33,11 +33,17 @@
                   },
                   "params": {
                     "type": "object",
-                    "description": "Extracted parameters.",
+                    "description": "Extracted parameters. Which are required depends on the use case (see the operation description for the endpoint mapping).",
                     "properties": {
-                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2." },
-                      "quarter": { "type": "string", "description": "Quarter override, e.g. 2026-Q2." },
-                      "institutionId": { "type": "string", "description": "Institution identifier." }
+                      "rollupAbaName": { "type": "string", "description": "Rollup ABA name (path segment)." },
+                      "zone": { "type": "string", "description": "Activity zone code (fee detail/summary path segment)." },
+                      "period": { "type": "string", "description": "Reporting period, e.g. 2026-Q2 (path segment)." },
+                      "startDt": { "type": "string", "description": "Range start date, ISO yyyy-MM-dd (fee detail path segment)." },
+                      "endDt": { "type": "string", "description": "Range end date, ISO yyyy-MM-dd (fee detail path segment)." },
+                      "denomType": { "type": "string", "description": "Denomination type (fee detail/summary path segment)." },
+                      "formatType": { "type": "string", "description": "Export format type, e.g. csv/pdf (export path segment)." },
+                      "reportName": { "type": "string", "description": "Report name for the export artifact (export path segment)." },
+                      "aba": { "type": "string", "description": "Target ABA appended on the export path." }
                     }
                   }
                 }

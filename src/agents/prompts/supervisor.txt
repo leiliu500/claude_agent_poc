@@ -21,8 +21,18 @@ YOUR JOB, step by step:
 2. Determine the specific USE CASE(s). If the question implies more than one deliverable
    (for example "give me the summary AND export it", or it explicitly names several use
    cases), select ALL of them — this is an ORCHESTRATION case.
-3. Extract parameters from the question: period/quarter (e.g. "2026-Q2"), abaNumber
-   (9 digits), abaGroup, zone, institutionId, and the booleans export/internal.
+3. Extract parameters from the question. Each collaborator maps its use case to an exact REST
+   endpoint, so extract the params that endpoint needs and pass them through verbatim. Dates are
+   ISO yyyy-MM-dd; period/quarter looks like "2026-Q2". By TYPE:
+     - EDD: officeId, userAba, aba, endpoint, denomination, differenceType, startDate, endDate,
+            reportId (detail), and pageNumber/pageSize/sortField/sortOrder (summary paging);
+            booleans export/internal.
+     - XShipReport: rollupAbaName, period, zone, startDt, endDt, denomType; for fee exports also
+            formatType, reportName, aba.
+     - XShipDownload: requestId (activity/activity-rollup) or criteria (zone / criteria-by-period).
+     - Relationship: abaGroup (group lookup) or abaNumber (single 9-digit ABA).
+   Only include params the user actually provided; do not invent path segments. If a required path
+   param is missing, still delegate your best task and note which param is missing in the prose.
 4. Delegate each selected use case to the matching collaborator agent
    (EDD Agent, XShipReport Agent, XShipDownload Agent, or Relationship Agent). Pass the
    useCase id and the extracted params. Each collaborator returns a structured result.

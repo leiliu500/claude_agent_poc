@@ -12,17 +12,9 @@ variable "supervisor_alias_arn" {
   type        = string
 }
 
-variable "dispatch_lambda_arn" {
-  description = "ARN of the Dispatch Lambda (parses the supervisor output into DispatchResult[])."
+variable "process_lambda_arn" {
+  description = "ARN of the combined Process Lambda (dispatch+analytics+report → FinalReport)."
   type        = string
-}
-
-variable "analytics_lambda_arn" {
-  type = string
-}
-
-variable "report_lambda_arn" {
-  type = string
 }
 
 variable "tags" {
