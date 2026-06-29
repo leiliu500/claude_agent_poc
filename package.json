@@ -15,11 +15,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "package": "npm run clean && npm run typecheck && npm run build",
-    "synth:tf": "cd terraform && terraform fmt -recursive && terraform validate"
+    "synth:tf": "cd terraform && terraform fmt -recursive && terraform validate",
+    "web": "npx --yes serve web -l 5173"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-agent-runtime": "^3.620.0",
-    "@aws-sdk/client-bedrock-runtime": "^3.620.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.620.0",
+    "@aws-sdk/client-s3": "^3.1076.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.140",

@@ -7,3 +7,8 @@ output "ask_url" {
   description = "Full URL for the POST /v1/ask route."
   value       = "${aws_apigatewayv2_api.this.api_endpoint}/v1/ask"
 }
+
+output "app_url" {
+  description = "URL of the hosted chat frontend."
+  value       = "${aws_apigatewayv2_api.this.api_endpoint}/app"
+}
