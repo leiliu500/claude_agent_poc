@@ -17,6 +17,16 @@ variable "entrypoint_function_name" {
   type        = string
 }
 
+variable "web_serve_invoke_arn" {
+  description = "invoke_arn of the web-serve Lambda that streams the static frontend from S3."
+  type        = string
+}
+
+variable "web_serve_function_name" {
+  description = "Function name of the web-serve Lambda (for the invoke permission)."
+  type        = string
+}
+
 variable "stage_name" {
   type    = string
   default = "v1"

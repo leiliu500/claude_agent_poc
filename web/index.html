@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reporting Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <button class="new-chat" id="newChat" title="New chat">
+            <span class="plus">+</span> New chat
+          </button>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Examples</div>
+          <ul class="examples" id="examples"></ul>
+        </div>
+        <div class="sidebar-foot">
+          <button class="settings-btn" id="settingsBtn" title="Settings">⚙ Settings</button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-btn" id="sidebarToggle" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+          <div class="title">
+            <span class="brand">Reporting Assistant</span>
+            <span class="subtitle">EDD · XShip · Relationship — Bedrock agentic backend</span>
+          </div>
+          <div class="status" id="connStatus" title="API endpoint">…</div>
+        </header>
+
+        <section class="chat" id="chat">
+          <div class="welcome" id="welcome">
+            <div class="welcome-logo">📊</div>
+            <h1>How can I help with your reports?</h1>
+            <p>Ask in plain language for an EDD, XShip, or ABA relationship report.
+               Responses render with summaries, highlights, and data tables.</p>
+            <div class="welcome-chips" id="welcomeChips"></div>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+        </section>
+
+        <footer class="composer">
+          <form class="composer-form" id="composerForm">
+            <textarea
+              id="input"
+              class="composer-input"
+              rows="1"
+              placeholder="Message Reporting Assistant…   (Enter to send, Shift+Enter for newline)"
+              autocomplete="off"
+            ></textarea>
+            <button type="submit" class="send-btn" id="sendBtn" title="Send" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path fill="currentColor" d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a1 1 0 00-1.39 1.2l2.1 6.2L14 12l-9.89.99-2.1 6.2a1 1 0 001.39 1.21z"/>
+              </svg>
+            </button>
+          </form>
+          <div class="composer-hint" id="composerHint">
+            The agent path can take 10–30s; if it exceeds the limit the backend returns a fast local result.
+          </div>
+      </footer>
+      </main>
+    </div>
+
+    <!-- Settings dialog -->
+    <dialog id="settingsDialog" class="settings-dialog">
+      <form method="dialog" class="settings-content">
+        <h2>Settings</h2>
+        <label class="field">
+          <span>API endpoint (POST /v1/ask)</span>
+          <input type="url" id="endpointInput" placeholder="https://…/v1/ask" />
+        </label>
+        <label class="field">
+          <span>Request timeout (seconds)</span>
+          <input type="number" id="timeoutInput" min="5" max="120" step="5" />
+        </label>
+        <p class="field-note">Stored locally in your browser. CORS is open on the API, so this page can call it from anywhere.</p>
+        <div class="settings-actions">
+          <button value="cancel" class="btn ghost">Cancel</button>
+          <button value="save" id="saveSettings" class="btn primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>
