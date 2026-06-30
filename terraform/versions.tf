@@ -12,6 +12,11 @@ terraform {
       # Flow version + alias are only available via AWS Cloud Control (awscc).
       version = ">= 1.0.0"
     }
+    random = {
+      source = "hashicorp/random"
+      # Generates the RDS master password (DBAgent Postgres directory, optional).
+      version = ">= 3.5.0"
+    }
   }
 
   # Uncomment and configure for production remote state.

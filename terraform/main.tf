@@ -9,6 +9,24 @@ module "iam" {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# RDS Postgres directory for the DBAgent (optional; off by default).
+# When disabled, the DBAgent Lambda uses the in-code directory that mirrors db/schema.sql.
+# ──────────────────────────────────────────────────────────────────────────────
+module "rds_postgres" {
+  count       = var.enable_database ? 1 : 0
+  source      = "./modules/rds-postgres"
+  name_prefix = local.name_prefix
+  tags        = local.common_tags
+}
+
+locals {
+  # DBAgent Lambda env + VPC placement: point at RDS only when the database is enabled.
+  db_lambda_env = var.enable_database ? { DATABASE_URL = module.rds_postgres[0].database_url } : {}
+  db_subnet_ids = var.enable_database ? module.rds_postgres[0].private_subnet_ids : []
+  db_sg_ids     = var.enable_database ? [module.rds_postgres[0].lambda_security_group_id] : []
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Worker Lambdas: 4 action groups + analytics + report.
 # These have NO dependency on the agents/flow, breaking the wiring cycle.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -49,6 +67,16 @@ module "lambda_workers" {
       timeout     = var.lambda_timeout_seconds
       memory_size = var.lambda_memory_mb
       description = "Relationship action-group Lambda (mock backend)."
+    }
+    "action-db" = {
+      zip_path               = "${var.dist_dir}/action-db.zip"
+      role_arn               = module.iam.lambda_db_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = var.lambda_timeout_seconds
+      memory_size            = var.lambda_memory_mb
+      description            = "DBAgent action-group Lambda: resolve user name -> identifiers (Postgres or in-memory mirror)."
     }
     "dispatch" = {
       zip_path    = "${var.dist_dir}/dispatch.zip"

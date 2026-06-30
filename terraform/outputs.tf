@@ -40,3 +40,13 @@ output "worker_lambda_names" {
 output "entrypoint_lambda_name" {
   value = module.lambda_entrypoint.function_names["api-entrypoint"]
 }
+
+output "database_endpoint" {
+  description = "RDS Postgres endpoint (empty unless enable_database=true)."
+  value       = var.enable_database ? module.rds_postgres[0].db_endpoint : ""
+}
+
+output "database_secret_arn" {
+  description = "Secrets Manager ARN with the DB credentials (empty unless enable_database=true)."
+  value       = var.enable_database ? module.rds_postgres[0].secret_arn : ""
+}

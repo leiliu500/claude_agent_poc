@@ -61,6 +61,9 @@ function eddRows(params: TaskParams, detail: boolean, internal: boolean): MockPa
     }
     return base;
   });
+  // Surface a stable reportId so the summary → detail orchestration chain has an id to pass on.
+  // A detail call carries the summary's reportId in params; echo it back when present.
+  const reportId = (params.reportId as string) ?? `EDD-${period(params)}-0001`;
   return {
     rows,
     meta: {
@@ -68,6 +71,7 @@ function eddRows(params: TaskParams, detail: boolean, internal: boolean): MockPa
       institutionFilter: params.institutionId ?? "ALL",
       detail,
       internal,
+      reportId,
       generatedRows: rows.length,
     },
   };

@@ -1,0 +1,74 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "DBAgent Action Group",
+    "version": "1.0.0",
+    "description": "Resolve a user name into the stored identifiers that fill downstream report API calls. The agent calls POST /run with { operation: \"lookupUserIdentifiers\", params: { userName } }; the Lambda queries the Postgres directory (db/schema.sql) and returns { found, fullName, identifiers } where identifiers maps id_type -> id_value (abaNumber, userAba, aba, abaGroup, rollupAbaName, endpoint, denomination, differenceType, zone, period, denomType, requestId, criteria)."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "lookupUserIdentifiers",
+        "summary": "Resolve a user name to its stored report identifiers.",
+        "description": "Looks the user up by name (case-insensitive) and returns the IDs that fill report API calls. A missing user name returns 400; an unknown user returns 404 with found=false.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["operation"],
+                "properties": {
+                  "operation": {
+                    "type": "string",
+                    "description": "The DB operation to run.",
+                    "enum": ["lookupUserIdentifiers"]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Operation parameters.",
+                    "required": ["userName"],
+                    "properties": {
+                      "userName": {
+                        "type": "string",
+                        "description": "The user's full name, e.g. \"Lei Liu\"."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resolved identifiers for the user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "found": { "type": "boolean" },
+                    "fullName": { "type": "string" },
+                    "identifiers": {
+                      "type": "object",
+                      "description": "id_type -> id_value, keyed by report param names.",
+                      "additionalProperties": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing user name (request validation failed)."
+          },
+          "404": {
+            "description": "Unknown user; found=false."
+          }
+        }
+      }
+    }
+  }
+}

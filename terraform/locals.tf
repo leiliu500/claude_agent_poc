@@ -44,6 +44,13 @@ locals {
       lambda_arn                = module.lambda_workers.function_arns["action-relationship"]
       collaboration_instruction = "Route here for ABA relationship lookups from the XSHI file (ABA group or single ABA)."
     }
+    db = {
+      display_name              = "DBAgent"
+      instruction               = file("${path.module}/../src/agents/prompts/db.txt")
+      api_schema                = file("${path.module}/openapi/db.json")
+      lambda_arn                = module.lambda_workers.function_arns["action-db"]
+      collaboration_instruction = "Call FIRST with the user name to resolve the user's stored identifiers (userAba, aba, abaGroup, rollupAbaName, endpoint, denomination, differenceType, zone, period, denomType, requestId, criteria) before delegating to the report collaborators. If no user name is present, the request is invalid."
+    }
   }
 
   common_tags = {

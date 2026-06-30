@@ -22,7 +22,7 @@
 import type { AgentType, DispatchResult, FinalReport } from "../../shared/types.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
 import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
-import { route } from "../../shared/router.js";
+import { orchestrate } from "../../shared/orchestrator.js";
 import { executeTasks } from "../../shared/dispatch.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
@@ -57,9 +57,10 @@ async function resolveResults(
   if (parsed.tasks.length > 0) {
     return { type: parsed.type, results: await executeTasks(parsed.tasks), source: "agent-tasks" };
   }
-  // Supervisor output unusable — deterministic local routing over the original question.
-  const decision = route(question);
-  return { type: decision.type, results: await executeTasks(decision.tasks), source: "local-router" };
+  // Supervisor output unusable — deterministic orchestration over the original question
+  // (validates the user name, resolves their IDs, and sequences EDD summary → detail).
+  const { type, results } = await orchestrate(question);
+  return { type, results, source: "local-orchestrator" };
 }
 
 export const handler = async (event: unknown): Promise<FinalReport> => {
