@@ -111,7 +111,7 @@
     const node = el("div", { class: "msg assistant" }, [
       el("div", { class: "avatar", text: "AI" }),
       el("div", { class: "body" }, [
-        el("div", { class: "role", text: "Reporting Assistant" }),
+        el("div", { class: "role", text: "Fedline Assistant" }),
         content,
       ]),
     ]);
