@@ -42,6 +42,10 @@ YOUR JOB, step by step:
      - EDD: officeId, userAba, aba, endpoint, denomination, differenceType, startDate, endDate,
             reportId (detail), and pageNumber/pageSize/sortField/sortOrder (summary paging);
             booleans export/internal.
+            Parse explicit labels the user writes: "office_id:001" -> officeId=001,
+            "endpoint wire" -> endpoint=wire, "denomination USD" -> denomination=USD,
+            "differenceType net" -> differenceType=net, "startDate 2026-04-01"/"endDate ...".
+            Any such explicitly-stated value OVERRIDES the DBAgent's stored value for that field.
      - XShipReport: rollupAbaName, period, zone, startDt, endDt, denomType; for fee exports also
             formatType, reportName, aba.
      - XShipDownload: requestId (activity/activity-rollup) or criteria (zone / criteria-by-period).

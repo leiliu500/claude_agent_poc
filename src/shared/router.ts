@@ -26,6 +26,15 @@ const ZONE_RE = /\bzone[ -]?([a-z0-9]+)\b/i;
 const GROUP_RE = /\b(?:aba )?group[ -]?([a-z0-9]+)\b/i;
 const ISO_DATE_RE = /\b(20\d{2}-\d{2}-\d{2})\b/g;
 
+// Explicitly-stated EDD request params. Each needs the literal field name followed by its value,
+// so they don't misfire on ordinary prose. Values may be alphanumeric with - or _.
+const OFFICE_RE = /\boffice(?:[_ ]?id)?\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
+const ENDPOINT_RE = /\bendpoint\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
+const DENOMINATION_RE = /\bdenomination\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
+const DIFF_TYPE_RE = /\bdifference[_ ]?type\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
+const START_DATE_RE = /\bstart\s*date\s*[:#]?\s*(20\d{2}-\d{2}-\d{2})/i;
+const END_DATE_RE = /\bend\s*date\s*[:#]?\s*(20\d{2}-\d{2}-\d{2})/i;
+
 /** Pull structured params out of the raw question. */
 export function extractParams(question: string): TaskParams {
   const q = question.toLowerCase();
@@ -51,6 +60,22 @@ export function extractParams(question: string): TaskParams {
     const end = dates[1] ?? dates[0];
     params.endDate = params.endDt = end;
   }
+
+  // EDD request-supplied path params stated explicitly in the prose (e.g. "office_id:001",
+  // "endpoint wire", "denomination USD", "differenceType net"). When present these OVERRIDE the
+  // DBAgent's stored defaults for the same field — the user is more specific than their profile.
+  const office = question.match(OFFICE_RE);
+  if (office) params.officeId = office[1];
+  const endpoint = question.match(ENDPOINT_RE);
+  if (endpoint) params.endpoint = endpoint[1];
+  const denom = question.match(DENOMINATION_RE);
+  if (denom) params.denomination = denom[1];
+  const diff = question.match(DIFF_TYPE_RE);
+  if (diff) params.differenceType = diff[1];
+  const startExplicit = question.match(START_DATE_RE);
+  if (startExplicit) params.startDate = params.startDt = startExplicit[1];
+  const endExplicit = question.match(END_DATE_RE);
+  if (endExplicit) params.endDate = params.endDt = endExplicit[1];
 
   if (/\b(export|download|csv|extract|file)\b/.test(q)) params.export = true;
   if (/\b(internal|confidential)\b/.test(q)) params.internal = true;
