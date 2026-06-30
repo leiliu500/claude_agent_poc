@@ -45,6 +45,18 @@ cd web && python -m http.server 5173    # then open http://localhost:5173
 The default API endpoint is prefilled (the deployed GovCloud URL). Change it any time via
 the **⚙ Settings** button — the endpoint and request timeout are saved in `localStorage`.
 
+## Response formats
+
+**Tables are the default.** To get a report in another format, either:
+
+- **Ask for it** — include the format in your message and it's returned automatically, e.g.
+  *"…as PDF"*, *"export …as Excel"*, *"…as CSV"*, *"…as JSON"*. The table preview still shows.
+- **Click an export button** under any report: **CSV**, **Excel**, **PDF**, **JSON**.
+
+Notes: exports are generated client-side from the structured report (no backend round-trip).
+CSV is UTF-8 with a BOM (opens cleanly in Excel); **Excel** is an `.xls` (HTML table) — Excel may
+ask to confirm the format on open; **PDF** uses the browser's print-to-PDF (a print dialog opens).
+
 ## Features
 
 - Multiline input: **Enter** sends, **Shift+Enter** newline; the box auto-grows.
