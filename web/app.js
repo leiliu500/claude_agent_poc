@@ -23,7 +23,8 @@
     "XShip fee summary and fee detail for 2026-Q2.",
     "Download shipping activity by ABA 123456789 for zone B1.",
     "What is the ABA group relationship in the xshi file for group 100?",
-    "Show the current quarter XShip report.",
+    "Export the XShip fee summary for 2026-Q2 as Excel.",
+    "Give me the EDD detail report for 2026-Q2 as PDF.",
   ];
 
   // ---------- DOM ----------
@@ -198,6 +199,9 @@
 
     (report.sections || []).forEach((sec, i) => wrap.appendChild(renderSection(sec, i)));
 
+    // Export controls (tables remain the default view; these download other formats).
+    wrap.appendChild(buildExportBar(report));
+
     // Footer: meta + raw JSON toggle.
     const totalRows = (report.sections || []).reduce((a, s) => a + ((s.rows && s.rows.length) || 0), 0);
     const foot = el("div", { class: "report-foot" });
@@ -225,6 +229,119 @@
     return el("div", { class: "error-box" }, [
       el("div", { class: "err-title", text: title }),
       detail ? el("div", { text: detail }) : null,
+    ]);
+  }
+
+  // ---------- Export: CSV / Excel / PDF / JSON ----------
+  // Tables are the DEFAULT rendering. When the user asks for a specific format (or clicks an
+  // export button), the same structured report is returned/downloaded in that format.
+  const FORMAT_LABEL = { pdf: "PDF", excel: "Excel", csv: "CSV", json: "JSON" };
+
+  function detectFormat(text) {
+    const q = (text || "").toLowerCase();
+    if (/\bpdf\b/.test(q)) return "pdf";
+    if (/\b(excel|xlsx|xls|spreadsheet|workbook)\b/.test(q)) return "excel";
+    if (/\b(csv|comma[-\s]?separated)\b/.test(q)) return "csv";
+    if (/\bjson\b/.test(q)) return "json";
+    return null;
+  }
+
+  const colsOf = (sec) =>
+    sec.columns && sec.columns.length
+      ? sec.columns
+      : Array.from(new Set((sec.rows || []).flatMap((r) => Object.keys(r))));
+  const baseName = (report) => String(report.reportId || report.type || "report").replace(/[^\w.-]+/g, "_");
+  const htmlEscape = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  function download(filename, content, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+
+  function csvEscape(v) {
+    const s = v == null ? "" : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+  function reportToCsv(report) {
+    const parts = [];
+    (report.sections || []).forEach((sec) => {
+      parts.push("# " + (sec.heading || sec.useCase || "section"));
+      const cols = colsOf(sec);
+      parts.push(cols.map(csvEscape).join(","));
+      (sec.rows || []).forEach((r) => parts.push(cols.map((c) => csvEscape(r[c])).join(",")));
+      parts.push("");
+    });
+    return "﻿" + parts.join("\r\n"); // BOM so Excel detects UTF-8
+  }
+  const exportCsv = (report) => download(baseName(report) + ".csv", reportToCsv(report), "text/csv;charset=utf-8");
+  const exportJson = (report) => download(baseName(report) + ".json", JSON.stringify(report, null, 2), "application/json");
+
+  function reportToExcelHtml(report) {
+    let h =
+      '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" ' +
+      'xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body>';
+    h += "<h3>" + htmlEscape(report.title || "Report") + "</h3>";
+    (report.sections || []).forEach((sec) => {
+      const cols = colsOf(sec);
+      h += "<h4>" + htmlEscape(sec.heading || sec.useCase || "") + "</h4>";
+      h += '<table border="1" cellspacing="0"><tr>' + cols.map((c) => "<th>" + htmlEscape(c) + "</th>").join("") + "</tr>";
+      (sec.rows || []).forEach((r) => {
+        h += "<tr>" + cols.map((c) => "<td>" + htmlEscape(r[c]) + "</td>").join("") + "</tr>";
+      });
+      h += "</table><br/>";
+    });
+    return h + "</body></html>";
+  }
+  const exportExcel = (report) => download(baseName(report) + ".xls", reportToExcelHtml(report), "application/vnd.ms-excel");
+
+  // PDF via the browser's print engine, rendered in a hidden iframe (no pop-up to be blocked).
+  function exportPdf(report) {
+    const tables = (report.sections || [])
+      .map((sec) => {
+        const cols = colsOf(sec);
+        const head = "<tr>" + cols.map((c) => "<th>" + htmlEscape(c) + "</th>").join("") + "</tr>";
+        const body = (sec.rows || [])
+          .map((r) => "<tr>" + cols.map((c) => "<td>" + htmlEscape(r[c]) + "</td>").join("") + "</tr>")
+          .join("");
+        const hi = (sec.highlights || []).map((x) => "<li>" + htmlEscape(x) + "</li>").join("");
+        return `<h2>${htmlEscape(sec.heading || sec.useCase || "")}</h2>${hi ? "<ul>" + hi + "</ul>" : ""}<table>${head}${body}</table>`;
+      })
+      .join("");
+    const doc = `<!doctype html><html><head><meta charset="utf-8"><title>${htmlEscape(report.title || "Report")}</title>
+      <style>body{font:13px -apple-system,Segoe UI,Roboto,sans-serif;color:#1f2328;margin:28px}
+      h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:18px 0 6px}.muted{color:#6b7280;font-size:12px}
+      table{border-collapse:collapse;width:100%;margin:6px 0 14px;font-size:12px}
+      th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#f3f3f3}ul{margin:4px 0 8px;color:#444}</style>
+      </head><body><h1>${htmlEscape(report.title || "Report")}</h1>
+      <div class="muted">${htmlEscape(report.type || "")} &middot; ${htmlEscape(report.reportId || "")} &middot; ${htmlEscape(report.generatedAt || "")}</div>
+      <p>${htmlEscape(report.summary || "")}</p>${tables}</body></html>`;
+    const iframe = el("iframe", { style: "position:fixed;right:0;bottom:0;width:0;height:0;border:0" });
+    document.body.appendChild(iframe);
+    const idoc = iframe.contentWindow.document;
+    idoc.open();
+    idoc.write(doc);
+    idoc.close();
+    iframe.onload = () => {
+      try { iframe.contentWindow.focus(); iframe.contentWindow.print(); } catch (e) { /* ignore */ }
+      setTimeout(() => iframe.remove(), 1500);
+    };
+  }
+
+  const EXPORTERS = { csv: exportCsv, excel: exportExcel, pdf: exportPdf, json: exportJson };
+
+  function buildExportBar(report) {
+    const btn = (label, fn) => el("button", { class: "export-btn", type: "button", text: label, onclick: () => fn(report) });
+    return el("div", { class: "export-bar" }, [
+      el("span", { class: "export-label", text: "Export:" }),
+      btn("CSV", exportCsv),
+      btn("Excel", exportExcel),
+      btn("PDF", exportPdf),
+      btn("JSON", exportJson),
     ]);
   }
 
@@ -267,8 +384,19 @@
       const { httpStatus, data } = await callApi(question);
 
       if (data && data.ok && data.report) {
-        ph.setContent(renderReport(data.report));
+        const node = renderReport(data.report);
+        // If the user asked for a specific format, return it in that format (download/print),
+        // while still showing the table preview by default.
+        const fmt = detectFormat(question);
+        if (fmt && EXPORTERS[fmt]) {
+          node.insertBefore(
+            el("div", { class: "export-note", text: `Returned as ${FORMAT_LABEL[fmt]} — your ${fmt === "pdf" ? "print dialog" : "download"} should start automatically. Table preview below.` }),
+            node.firstChild,
+          );
+        }
+        ph.setContent(node);
         history.push({ role: "assistant", report: data.report });
+        if (fmt && EXPORTERS[fmt]) setTimeout(() => EXPORTERS[fmt](data.report), 120);
       } else if (data && data.error) {
         ph.setContent(renderError("Request failed", data.error + (data.traceId ? `  (trace ${data.traceId})` : "")));
       } else if (data && data._raw !== undefined) {
