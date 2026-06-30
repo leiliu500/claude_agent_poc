@@ -13,6 +13,10 @@ import { makeActionGroupHandler } from "../shared/action-group.js";
 import { readFlowInputs } from "../shared/flow-io.js";
 import { handler as dispatchHandler } from "../lambdas/dispatch/handler.js";
 import { handler as processHandler } from "../lambdas/flow-process/handler.js";
+import { handler as dbHandler } from "../lambdas/action-groups/db/handler.js";
+import { orchestrate } from "../shared/orchestrator.js";
+import { extractUserName, lookupUserIdentifiers } from "../shared/user-directory.js";
+import { ValidationError } from "../shared/errors.js";
 
 async function pipeline(question: string) {
   const decision = route(question);
@@ -236,10 +240,10 @@ describe("flow-process node (combined dispatch+analytics+report)", () => {
     expect(report.summary).toMatch(/Enhanced Due-Diligence/);
   });
 
-  it("falls back to the local router when the agent output is unusable", async () => {
+  it("falls back to deterministic orchestration when the agent output is unusable", async () => {
     const report = await processHandler({
       inputs: [
-        { name: "question", value: "XShip fee summary for 2026-Q2" },
+        { name: "question", value: "user name: Lei Liu, XShip fee summary for 2026-Q2" },
         { name: "agentResponse", value: "no json here" },
       ],
     });
@@ -251,6 +255,98 @@ describe("flow-process node (combined dispatch+analytics+report)", () => {
     const report = await processHandler({});
     expect(report.reportId).toMatch(/^RPT-/);
     expect(Array.isArray(report.sections)).toBe(true);
+  });
+});
+
+describe("user directory (DBAgent seam)", () => {
+  it("extracts an explicit 'user name: X' form", () => {
+    expect(extractUserName("user name: Lei Liu, EDD summary for 2026-Q2")).toBe("Lei Liu");
+  });
+
+  it("matches a known directory name mentioned directly", () => {
+    expect(extractUserName("Run the EDD summary for Lei Liu")).toBe("Lei Liu");
+  });
+
+  it("returns undefined when no user is identifiable", () => {
+    expect(extractUserName("EDD summary report for 2026-Q2")).toBeUndefined();
+  });
+
+  it("resolves a known user's stored identifiers", async () => {
+    const lookup = await lookupUserIdentifiers("lei liu");
+    expect(lookup.found).toBe(true);
+    expect(lookup.identifiers.abaNumber).toBe("000001");
+    expect(lookup.identifiers.userAba).toBe("000001");
+    expect(lookup.identifiers.endpoint).toBe("web");
+  });
+
+  it("reports an unknown user as not found", async () => {
+    const lookup = await lookupUserIdentifiers("Nobody Here");
+    expect(lookup.found).toBe(false);
+    expect(Object.keys(lookup.identifiers)).toHaveLength(0);
+  });
+});
+
+describe("DBAgent action group", () => {
+  it("returns identifiers for a known user", async () => {
+    const resp = await dbHandler({
+      actionGroup: "db-run",
+      requestBody: {
+        content: { "application/json": { properties: [{ name: "params", value: JSON.stringify({ userName: "Lei Liu" }) }] } },
+      },
+    });
+    expect(resp.response.httpStatusCode).toBe(200);
+    const body = JSON.parse(resp.response.responseBody["application/json"].body);
+    expect(body.found).toBe(true);
+    expect(body.identifiers.aba).toBe("011000015");
+  });
+
+  it("rejects a missing user name with 400", async () => {
+    const resp = await dbHandler({ actionGroup: "db-run", requestBody: { content: { "application/json": { properties: [] } } } });
+    expect(resp.response.httpStatusCode).toBe(400);
+  });
+
+  it("returns 404 for an unknown user", async () => {
+    const resp = await dbHandler({
+      actionGroup: "db-run",
+      parameters: [{ name: "userName", value: "Ghost User" }],
+    });
+    expect(resp.response.httpStatusCode).toBe(404);
+  });
+});
+
+describe("orchestrator (supervisor-equivalent)", () => {
+  it("requires a user name", async () => {
+    await expect(orchestrate("EDD summary report for 2026-Q2")).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("rejects an unknown user", async () => {
+    await expect(orchestrate("EDD summary for user name: Ghost User")).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("merges the user's DB identifiers into EDD summary params", async () => {
+    const { type, results } = await orchestrate("EDD summary report for Lei Liu, 2026-Q2");
+    expect(type).toBe("EDD");
+    const summary = results.find((r) => r.useCase === "eddSummaryReport")!;
+    // userAba/aba/endpoint/denomination/differenceType come from the DB and fill the path.
+    expect(String(summary.meta.endpoint)).toContain("/eddReport/summary/");
+    expect(String(summary.meta.endpoint)).toContain("/011000015/");
+    // The only unfilled path params are the request-supplied ones (officeId + date range),
+    // never the DB-resolved identifiers.
+    const missing = (summary.meta.endpointMissingParams as string[] | undefined) ?? [];
+    for (const dbParam of ["userAba", "aba", "endpoint", "denomination", "differenceType"]) {
+      expect(missing).not.toContain(dbParam);
+    }
+  });
+
+  it("runs eddSummaryReport first, then eddDetailReport with the derived reportId", async () => {
+    const { results } = await orchestrate("EDD detail report for Lei Liu, 2026-Q2");
+    const ids = results.map((r) => r.useCase);
+    expect(ids).toContain("eddSummaryReport");
+    expect(ids).toContain("eddDetailReport");
+    expect(ids.indexOf("eddSummaryReport")).toBeLessThan(ids.indexOf("eddDetailReport"));
+    const detail = results.find((r) => r.useCase === "eddDetailReport")!;
+    // The detail endpoint is filled with the reportId the summary produced (no missing path param).
+    expect(String(detail.meta.endpoint)).toMatch(/\/eddReport\/detail\/EDD-2026-Q2-0001/);
   });
 });
 

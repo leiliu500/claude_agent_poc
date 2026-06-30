@@ -22,6 +22,7 @@ const LAMBDAS = [
   { name: "action-xship-report", entry: "src/lambdas/action-groups/xship-report/handler.ts" },
   { name: "action-xship-download", entry: "src/lambdas/action-groups/xship-download/handler.ts" },
   { name: "action-relationship", entry: "src/lambdas/action-groups/relationship/handler.ts" },
+  { name: "action-db", entry: "src/lambdas/action-groups/db/handler.ts" },
   { name: "dispatch", entry: "src/lambdas/dispatch/handler.ts" },
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },
   { name: "report", entry: "src/lambdas/report/handler.ts" },
@@ -30,7 +31,10 @@ const LAMBDAS = [
 ];
 
 // AWS SDK v3 is provided by the Node 20 Lambda runtime — keep it external.
-const EXTERNAL = ["@aws-sdk/*"];
+// `pg` is imported lazily by the DBAgent Lambda only when DATABASE_URL is set; keep it external so
+// the default (in-memory directory) build needs no dependency. Provide pg via a Lambda layer when
+// enabling the real Postgres path.
+const EXTERNAL = ["@aws-sdk/*", "pg"];
 
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });

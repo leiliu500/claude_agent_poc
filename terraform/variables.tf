@@ -56,3 +56,14 @@ variable "dist_dir" {
   type        = string
   default     = "../dist"
 }
+
+variable "enable_database" {
+  description = <<-EOT
+    Provision the RDS Postgres directory (db/schema.sql) and point the DBAgent Lambda at it via
+    DATABASE_URL + VPC config. When false (default), the DBAgent Lambda uses the in-code directory
+    that mirrors the schema, so the whole system runs with no database. Enabling requires the `pg`
+    driver to be available to the Lambda (e.g. a layer) and db/schema.sql to be loaded once.
+  EOT
+  type        = bool
+  default     = false
+}

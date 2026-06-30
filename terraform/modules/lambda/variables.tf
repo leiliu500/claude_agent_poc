@@ -11,6 +11,9 @@ variable "functions" {
     timeout     = number
     memory_size = number
     description = string
+    # Optional VPC placement (e.g. the DBAgent Lambda reaching RDS in private subnets).
+    vpc_subnet_ids         = optional(list(string), [])
+    vpc_security_group_ids = optional(list(string), [])
   }))
 }
 

@@ -65,6 +65,40 @@ resource "aws_iam_role_policy" "entrypoint_bedrock" {
   policy = data.aws_iam_policy_document.entrypoint_bedrock.json
 }
 
+# DBAgent role: logs + VPC ENI management (to reach RDS) + read the DB credentials secret.
+# Used by the action-db Lambda. The VPC/secret perms are harmless when the DB is disabled (the
+# Lambda then runs the in-memory directory and never attaches to a VPC or reads the secret).
+resource "aws_iam_role" "lambda_db" {
+  name               = "${var.name_prefix}-lambda-db"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+  tags               = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_db_logs" {
+  role       = aws_iam_role.lambda_db.name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_db_vpc" {
+  role       = aws_iam_role.lambda_db.name
+  policy_arn = "arn:${local.partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+data "aws_iam_policy_document" "lambda_db_secret" {
+  statement {
+    sid       = "ReadDbSecret"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:${local.partition}:secretsmanager:${local.region}:${local.account_id}:secret:${var.name_prefix}-fedline-db-*"]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_db_secret" {
+  name   = "${var.name_prefix}-lambda-db-secret"
+  role   = aws_iam_role.lambda_db.id
+  policy = data.aws_iam_policy_document.lambda_db_secret.json
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Bedrock Agent service role (assumed by bedrock.amazonaws.com)
 # ──────────────────────────────────────────────────────────────────────────────

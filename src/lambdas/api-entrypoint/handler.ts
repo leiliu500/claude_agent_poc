@@ -15,8 +15,8 @@
  */
 import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
 import type { AskRequest, AskResponse, FinalReport } from "../../shared/types.js";
-import { route } from "../../shared/router.js";
-import { executeTasks } from "../../shared/dispatch.js";
+import { orchestrate } from "../../shared/orchestrator.js";
+import { extractUserName, lookupUserIdentifiers } from "../../shared/user-directory.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
 import { invokeFlow } from "../../shared/bedrock.js";
@@ -57,14 +57,33 @@ function respond(statusCode: number, body: AskResponse): APIGatewayProxyResultV2
   };
 }
 
-/** Deterministic, in-process equivalent of the whole flow (router → ... → report). */
+/**
+ * Validate that the request names a known user BEFORE any orchestration. A missing user name or an
+ * unknown user is a 400 — the Supervisor's request-validation step, enforced at the API edge so it
+ * holds in both agent and local modes. Returns the resolved identifiers for logging/telemetry.
+ */
+async function assertUserResolvable(question: string): Promise<void> {
+  const userName = extractUserName(question);
+  if (!userName) {
+    throw new ValidationError(
+      "A user name is required to run a report. Include it in your request, e.g. \"user name: Lei Liu\".",
+    );
+  }
+  const lookup = await lookupUserIdentifiers(userName);
+  if (!lookup.found) {
+    throw new ValidationError(
+      `Unknown user '${userName}'. No identifiers are on file for that name, so the report cannot be run.`,
+    );
+  }
+}
+
+/** Deterministic, in-process equivalent of the whole flow (validate user → orchestrate → report). */
 async function runLocal(question: string): Promise<FinalReport> {
-  const decision = route(question);
-  const results = await executeTasks(decision.tasks);
+  const { type, results } = await orchestrate(question);
   const analytics = runAnalytics(results);
   return generateReport({
     question,
-    type: decision.type,
+    type,
     dispatchResults: results,
     analytics,
     generatedAt: new Date().toISOString(),
@@ -100,6 +119,10 @@ export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGateway
   try {
     const { question } = parseBody(event);
     reqLog.info("ask received", { question });
+
+    // Requirement: a user name must be present and known. Reject early (400) in every mode so a
+    // slow flow is never even started for an invalid request.
+    await assertUserResolvable(question);
 
     const report = await produceReport(question);
 
