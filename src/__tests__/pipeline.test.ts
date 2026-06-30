@@ -338,6 +338,20 @@ describe("orchestrator (supervisor-equivalent)", () => {
     }
   });
 
+  it("lets explicit request params override the user's stored DB defaults", async () => {
+    const { results } = await orchestrate(
+      "It is Lei Liu, office_id:001 Run the EDD summary report, endpoint wire, denomination USD, " +
+        "differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
+    );
+    const summary = results.find((r) => r.useCase === "eddSummaryReport")!;
+    // officeId from the request, userAba/aba from the DB, and endpoint/denomination OVERRIDDEN by
+    // the explicit request values (wire/USD), not the stored defaults (web/USD-100).
+    expect(String(summary.meta.endpoint)).toBe(
+      "/eddReport/summary/001/000001/011000015/wire/USD/net/2026-04-01/2026-06-30",
+    );
+    expect(summary.meta.endpointMissingParams).toBeUndefined();
+  });
+
   it("runs eddSummaryReport first, then eddDetailReport with the derived reportId", async () => {
     const { results } = await orchestrate("EDD detail report for Lei Liu, 2026-Q2");
     const ids = results.map((r) => r.useCase);
