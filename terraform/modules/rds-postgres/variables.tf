@@ -15,9 +15,9 @@ variable "db_username" {
 }
 
 variable "engine_version" {
-  description = "Postgres engine version."
+  description = "Postgres engine version (must be offered in the target region; see aws rds describe-db-engine-versions)."
   type        = string
-  default     = "16.4"
+  default     = "16.10"
 }
 
 variable "instance_class" {
