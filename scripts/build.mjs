@@ -5,7 +5,7 @@
 // Node 20 runtime (there is no package.json `type:module` in the zip), so `exports.handler`
 // is what Lambda resolves. esbuild transpiles our ESM source to CJS automatically.
 import { build } from "esbuild";
-import { mkdirSync, rmSync, writeFileSync, createWriteStream, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, createWriteStream, existsSync, copyFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
@@ -30,13 +30,16 @@ const LAMBDAS = [
   { name: "report", entry: "src/lambdas/report/handler.ts" },
   { name: "flow-process", entry: "src/lambdas/flow-process/handler.ts" },
   { name: "web-serve", entry: "src/lambdas/web-serve/handler.ts" },
+  // One-off migration Lambda: bundles db/schema.sql (copied in below) and applies it in-VPC.
+  { name: "db-migrate", entry: "src/lambdas/db-migrate/handler.ts", assets: [["db/schema.sql", "schema.sql"]] },
 ];
 
 // AWS SDK v3 is provided by the Node 20 Lambda runtime — keep it external.
-// `pg` is imported lazily by the DBAgent Lambda only when DATABASE_URL is set; keep it external so
-// the default (in-memory directory) build needs no dependency. Provide pg via a Lambda layer when
-// enabling the real Postgres path.
-const EXTERNAL = ["@aws-sdk/*", "pg"];
+// `pg` IS bundled (it's a dependency): the DB subnets have no NAT/VPC-endpoint to fetch a layer at
+// runtime, so the driver must ship inside the zip. It's still imported lazily in code, so the
+// in-memory paths never touch it. Its optional native/edge backends are excluded — the pure-JS
+// driver is guarded behind those requires and we never select them.
+const EXTERNAL = ["@aws-sdk/*", "pg-native", "pg-cloudflare"];
 
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
@@ -58,6 +61,10 @@ for (const lambda of LAMBDAS) {
   // Mark the bundle as CommonJS explicitly. The repo's root package.json is `type:module`,
   // so without this a bare index.js would be misread as ESM both locally and could be ambiguous.
   writeFileSync(join(outdir, "package.json"), JSON.stringify({ type: "commonjs" }) + "\n");
+  // Copy any non-code assets (e.g. schema.sql) into the bundle dir so they're zipped alongside index.js.
+  for (const [src, dest] of lambda.assets ?? []) {
+    copyFileSync(join(root, src), join(outdir, dest));
+  }
   await zipDir(outdir, join(distDir, `${lambda.name}.zip`));
   console.log(`packaged ${lambda.name} -> dist/${lambda.name}.zip`);
 }

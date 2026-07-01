@@ -2,7 +2,7 @@
  * End-to-end local pipeline tests: router → dispatch → analytics → report.
  * No AWS required — this is exactly what ORCHESTRATION_MODE=local runs.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { route } from "../shared/router.js";
 import { executeTasks } from "../shared/dispatch.js";
 import { runAnalytics } from "../shared/analytics.js";
@@ -15,8 +15,10 @@ import { handler as dispatchHandler } from "../lambdas/dispatch/handler.js";
 import { handler as processHandler } from "../lambdas/flow-process/handler.js";
 import { handler as dbHandler } from "../lambdas/action-groups/db/handler.js";
 import { orchestrate } from "../shared/orchestrator.js";
+import { clearMemoryForTests } from "../shared/report-memory.js";
 import { extractUserName, lookupUserIdentifiers } from "../shared/user-directory.js";
 import { ValidationError } from "../shared/errors.js";
+import type { AuthContext } from "../shared/types.js";
 
 async function pipeline(question: string) {
   const decision = route(question);
@@ -361,6 +363,56 @@ describe("orchestrator (supervisor-equivalent)", () => {
     const detail = results.find((r) => r.useCase === "eddDetailReport")!;
     // The detail endpoint is filled with the reportId the summary produced (no missing path param).
     expect(String(detail.meta.endpoint)).toMatch(/\/eddReport\/detail\/EDD-2026-Q2-0001/);
+  });
+});
+
+describe("cross-session report memory", () => {
+  // Memory is keyed on the authenticated user; the in-process store persists across turns within
+  // the process, so clear it between cases to isolate them.
+  beforeEach(() => clearMemoryForTests());
+
+  async function authForLeiLiu(userId: string): Promise<AuthContext> {
+    const lookup = await lookupUserIdentifiers("Lei Liu");
+    return { userId, userName: "Lei Liu", identifiers: lookup.identifiers };
+  }
+
+  it("reuses a prior summary's reportId for a later detail request WITHOUT re-running the summary", async () => {
+    const auth = await authForLeiLiu("1");
+
+    // Turn 1 (this session): the user runs the EDD summary — its reportId gets remembered.
+    const t1 = await orchestrate("EDD summary report for 2026-Q2", auth);
+    expect(t1.results.map((r) => r.useCase)).toContain("eddSummaryReport");
+    const summaryReportId = String(t1.results.find((r) => r.useCase === "eddSummaryReport")!.meta.reportId);
+    expect(summaryReportId).toBe("EDD-2026-Q2-0001");
+
+    // Turn 2 (later): the user asks for the detail. The summary is NOT re-run — the detail runs
+    // directly against the remembered reportId. This is the whole point of the feature.
+    const t2 = await orchestrate("EDD detail report for 2026-Q2", auth);
+    const useCases = t2.results.map((r) => r.useCase);
+    expect(useCases).toContain("eddDetailReport");
+    expect(useCases).not.toContain("eddSummaryReport");
+    const detail = t2.results.find((r) => r.useCase === "eddDetailReport")!;
+    expect(String(detail.meta.endpoint)).toMatch(/\/eddReport\/detail\/EDD-2026-Q2-0001/);
+  });
+
+  it("serves 'now the detail' (no period repeated) from the user's most recent remembered summary", async () => {
+    const auth = await authForLeiLiu("1");
+    await orchestrate("EDD summary report for 2026-Q2", auth);
+
+    // A bare detail ask, repeating no period, follows up on the last summary via recall_latest.
+    const t2 = await orchestrate("Give me the EDD detail report", auth);
+    const useCases = t2.results.map((r) => r.useCase);
+    expect(useCases).toContain("eddDetailReport");
+    expect(useCases).not.toContain("eddSummaryReport");
+  });
+
+  it("without a userId (legacy path) memory is disabled and the summary still runs first", async () => {
+    const auth = await authForLeiLiu(""); // empty userId => memory off
+    const t = await orchestrate("EDD detail report for 2026-Q2", auth);
+    const useCases = t.results.map((r) => r.useCase);
+    expect(useCases).toContain("eddSummaryReport");
+    expect(useCases).toContain("eddDetailReport");
+    expect(useCases.indexOf("eddSummaryReport")).toBeLessThan(useCases.indexOf("eddDetailReport"));
   });
 });
 
