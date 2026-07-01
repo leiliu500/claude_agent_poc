@@ -17,6 +17,7 @@ import { handler as dbHandler } from "../lambdas/action-groups/db/handler.js";
 import { orchestrate } from "../shared/orchestrator.js";
 import { clearMemoryForTests } from "../shared/report-memory.js";
 import { extractUserName, lookupUserIdentifiers } from "../shared/user-directory.js";
+import { generateMock } from "../mock/data.js";
 import { ValidationError } from "../shared/errors.js";
 import type { AuthContext } from "../shared/types.js";
 
@@ -360,9 +361,12 @@ describe("orchestrator (supervisor-equivalent)", () => {
     expect(ids).toContain("eddSummaryReport");
     expect(ids).toContain("eddDetailReport");
     expect(ids.indexOf("eddSummaryReport")).toBeLessThan(ids.indexOf("eddDetailReport"));
+    const summary = results.find((r) => r.useCase === "eddSummaryReport")!;
     const detail = results.find((r) => r.useCase === "eddDetailReport")!;
-    // The detail endpoint is filled with the reportId the summary produced (no missing path param).
-    expect(String(detail.meta.endpoint)).toMatch(/\/eddReport\/detail\/EDD-2026-Q2-0001/);
+    // The detail endpoint is filled with the exact reportId the summary produced (id_id format,
+    // e.g. `${eddLoadID}_${ncdwRecordID}`), so there is no missing path param.
+    expect(String(summary.meta.reportId)).toMatch(/^\d+_\d+$/);
+    expect(String(detail.meta.endpoint)).toContain(`/eddReport/detail/${summary.meta.reportId}`);
   });
 });
 
@@ -383,7 +387,7 @@ describe("cross-session report memory", () => {
     const t1 = await orchestrate("EDD summary report for 2026-Q2", auth);
     expect(t1.results.map((r) => r.useCase)).toContain("eddSummaryReport");
     const summaryReportId = String(t1.results.find((r) => r.useCase === "eddSummaryReport")!.meta.reportId);
-    expect(summaryReportId).toBe("EDD-2026-Q2-0001");
+    expect(summaryReportId).toMatch(/^\d+_\d+$/); // `${eddLoadID}_${ncdwRecordID}`
 
     // Turn 2 (later): the user asks for the detail. The summary is NOT re-run — the detail runs
     // directly against the remembered reportId. This is the whole point of the feature.
@@ -392,7 +396,7 @@ describe("cross-session report memory", () => {
     expect(useCases).toContain("eddDetailReport");
     expect(useCases).not.toContain("eddSummaryReport");
     const detail = t2.results.find((r) => r.useCase === "eddDetailReport")!;
-    expect(String(detail.meta.endpoint)).toMatch(/\/eddReport\/detail\/EDD-2026-Q2-0001/);
+    expect(String(detail.meta.endpoint)).toContain(`/eddReport/detail/${summaryReportId}`);
   });
 
   it("serves 'now the detail' (no period repeated) from the user's most recent remembered summary", async () => {
@@ -413,6 +417,57 @@ describe("cross-session report memory", () => {
     expect(useCases).toContain("eddSummaryReport");
     expect(useCases).toContain("eddDetailReport");
     expect(useCases.indexOf("eddSummaryReport")).toBeLessThan(useCases.indexOf("eddDetailReport"));
+  });
+});
+
+describe("EDD mock shapes (realistic API simulation)", () => {
+  const eddParams = {
+    officeId: "121000374", aba: "052001633", endpoint: "0520016333300",
+    denomination: "FF", differenceType: "4", startDate: "2024-04-01", endDate: "2024-05-01",
+    pageNumber: 2, pageSize: 5,
+  };
+
+  it("summary returns EDD records with the real reportDataList fields + totalEdds", () => {
+    const { rows, meta } = generateMock("eddSummaryReport", eddParams);
+    expect(rows.length).toBeLessThanOrEqual(5); // capped by pageSize
+    const r = rows[0]!;
+    for (const f of ["adviceNumber", "aba", "abaName", "endpointNumber", "depositType", "endpointName",
+      "depositDate", "depositAmount", "denomination", "differenceType", "differenceAmount", "eddLoadID", "ncdwRecordID"]) {
+      expect(r).toHaveProperty(f);
+    }
+    expect(r.aba).toBe("052001633");
+    expect(r.endpointNumber).toBe("0520016333300"); // = aba + "3300"
+    expect(typeof meta.totalEdds).toBe("number");
+    // reportId is the primary record's `${eddLoadID}_${ncdwRecordID}`.
+    expect(String(meta.reportId)).toMatch(/^\d+_\d+$/);
+    expect(String(meta.reportId)).toBe(`${rows[0]!.eddLoadID}_${rows[0]!.ncdwRecordID}`);
+    expect((meta.result as { totalEdds: number }).totalEdds).toBe(meta.totalEdds);
+  });
+
+  it("detail expands ONE record into the nested edd sections for the summary's reportId", () => {
+    const { meta } = generateMock("eddSummaryReport", eddParams);
+    const reportId = String(meta.reportId);
+    const detail = generateMock("eddDetailReport", { ...eddParams, reportId });
+    expect(detail.meta.reportId).toBe(reportId);
+    const edd = (detail.meta.edd ?? {}) as Record<string, Record<string, unknown>>;
+    for (const section of ["differenceDetail", "depositDetail", "adminAddress", "forAccountAddress",
+      "cashDeptAddress", "additionalInfo"]) {
+      expect(edd).toHaveProperty(section);
+    }
+    expect(edd.depositDetail).toHaveProperty("depositID");
+    expect(edd.additionalInfo).toHaveProperty("differenceID");
+    // Faithful raw envelope: result.reportDataList[0].edd matches the sample detail response.
+    const env = detail.meta.result as { reportDataList: Array<{ edd: unknown }> };
+    expect(env.reportDataList[0]!.edd).toBe(edd);
+    // The table row is a flat projection (no nested objects, so it renders cleanly).
+    expect(detail.rows).toHaveLength(1);
+    for (const v of Object.values(detail.rows[0]!)) expect(typeof v).not.toBe("object");
+  });
+
+  it("is deterministic for the same params (stable tests / reproducible demos)", () => {
+    const a = generateMock("eddSummaryReport", eddParams).meta.reportId;
+    const b = generateMock("eddSummaryReport", eddParams).meta.reportId;
+    expect(a).toBe(b);
   });
 });
 

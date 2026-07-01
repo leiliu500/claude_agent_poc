@@ -37,42 +37,229 @@ const INSTITUTIONS = ["First National", "Coastal Trust", "Summit Bank", "Harbor 
 const ZONES = ["A1", "A2", "B1", "C3", "D7"];
 
 // ── EDD ────────────────────────────────────────────────────────────────────────
-function eddRows(params: TaskParams, detail: boolean, internal: boolean): MockPayload {
-  const rnd = seeded(`edd:${period(params)}:${detail}:${internal}`);
-  const count = detail ? 12 : 5;
-  const rows = Array.from({ length: count }, (_, i) => {
-    const inst = INSTITUTIONS[i % INSTITUTIONS.length]!;
-    const risk = Math.round(rnd() * 100);
-    const base: Record<string, unknown> = {
-      institution: inst,
-      period: period(params),
-      riskScore: risk,
-      riskTier: risk > 70 ? "High" : risk > 40 ? "Medium" : "Low",
-      flaggedCount: Math.round(rnd() * 20),
-    };
-    if (detail) {
-      base.caseId = `EDD-${period(params)}-${1000 + i}`;
-      base.reviewer = ["A.Kim", "L.Ortiz", "M.Patel"][i % 3];
-      base.amountUsd = Math.round(rnd() * 500000);
-    }
-    if (internal) {
-      base.internalNotes = `auto-flagged:${risk > 70 ? "SAR-review" : "clear"}`;
-      base.analystOverride = rnd() > 0.7;
-    }
-    return base;
-  });
-  // Surface a stable reportId so the summary → detail orchestration chain has an id to pass on.
-  // A detail call carries the summary's reportId in params; echo it back when present.
-  const reportId = (params.reportId as string) ?? `EDD-${period(params)}-0001`;
+// Shaped after the real EDD REST API (see the sample summary/detail responses):
+//   summary → { result: { totalEdds, reportDataList: [ {edd row}, ... ] } }
+//   detail  → { result: { reportDataList: [ { edd: { differenceDetail, depositDetail, ... } } ] } }
+// The summary lists EDD records (each carrying eddLoadID + ncdwRecordID); the detail expands ONE
+// record into its nested sections. The summary→detail chain (and the report memory feature) keys on
+// a `reportId` derived from a record's identifiers: `${eddLoadID}_${ncdwRecordID}`.
+const EDD_BANKS = [
+  { aba: "052001633", abaName: "BANK OF AMERICA, NA, MD" },
+  { aba: "121000248", abaName: "WELLS FARGO BANK, NA" },
+  { aba: "021000021", abaName: "JPMORGAN CHASE BANK, NA" },
+  { aba: "021000089", abaName: "CITIBANK, NA" },
+  { aba: "091000022", abaName: "U.S. BANK, NA" },
+];
+const EDD_ARMORED = ["GARDA SAN FRANCISCO", "BRINKS LOS ANGELES", "LOOMIS SEATTLE", "GARDA PHOENIX", "BRINKS DENVER"];
+const EDD_DENOMS = ["$1", "$5", "$10", "$20", "$50", "$100"];
+const EDD_DIFF_TYPES = ["Counterfeit", "Overage", "Shortage", "Unfit", "Suspect"];
+const EDD_DEPOSIT_TYPES = ["Currency", "Coin"];
+const FRB_OFFICES = [
+  { teamNumber: "CV65", frbOfficeName: "San Francisco", address: "101 MARKET STREET", city: "SAN FRANCISCO", state: "CA", zipCode: "94105" },
+  { teamNumber: "CV31", frbOfficeName: "Los Angeles", address: "950 S GRAND AVE", city: "LOS ANGELES", state: "CA", zipCode: "90015" },
+  { teamNumber: "CV12", frbOfficeName: "Seattle", address: "2100 3RD AVE", city: "SEATTLE", state: "WA", zipCode: "98121" },
+];
+
+function eddStartDate(params: TaskParams): string {
+  return (params.startDate as string) ?? "2024-04-01";
+}
+function eddEndDate(params: TaskParams): string {
+  return (params.endDate as string) ?? "2024-05-01";
+}
+/** Add whole days to a YYYY-MM-DD date, returning YYYY-MM-DD (deterministic, UTC). */
+function addDays(isoDate: string, days: number): string {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+/** Numeric value of a "$50"-style denomination label. */
+function denomValue(denom: string): number {
+  return Number(denom.replace(/[^0-9.]/g, "")) || 1;
+}
+
+/** The stored identifiers of one EDD record — the seed for both the summary row and its detail. */
+interface EddKey {
+  eddLoadID: number;
+  ncdwRecordID: number;
+}
+
+/** Derive a report's primary EDD record id (page-independent) so summary→detail stays stable. */
+function primaryEddKey(params: TaskParams): EddKey {
+  const sig = [params.officeId, params.aba, params.endpoint, params.denomination, params.differenceType, eddStartDate(params), eddEndDate(params)]
+    .map((v) => (v == null ? "" : String(v)))
+    .join("|");
+  const r = seeded(`edd:report:${sig}`);
+  return { eddLoadID: 1000 + Math.floor(r() * 9000), ncdwRecordID: 3003600000 + Math.floor(r() * 400000) };
+}
+
+/** Build one EDD summary record (the shape inside `result.reportDataList`). */
+function eddSummaryRecord(params: TaskParams, index: number, key: EddKey): Record<string, unknown> {
+  const rnd = seeded(`edd:rec:${key.eddLoadID}:${key.ncdwRecordID}:${index}`);
+  const bank = params.aba
+    ? { aba: String(params.aba), abaName: EDD_BANKS.find((b) => b.aba === String(params.aba))?.abaName ?? "BANK OF AMERICA, NA, MD" }
+    : EDD_BANKS[index % EDD_BANKS.length]!;
+  const endpointNumber = (params.endpoint as string) ?? `${bank.aba}3300`;
+  const armored = EDD_ARMORED[index % EDD_ARMORED.length]!;
+  const denomination = EDD_DENOMS[Math.floor(rnd() * EDD_DENOMS.length)]!;
+  const differenceType = EDD_DIFF_TYPES[Math.floor(rnd() * EDD_DIFF_TYPES.length)]!;
+  const units = 1 + Math.floor(rnd() * 3);
+  const differenceAmount = (differenceType === "Overage" ? 1 : -1) * denomValue(denomination) * units;
+  return {
+    adviceNumber: 40 + index + (key.eddLoadID % 10),
+    differenceDate: `${addDays(eddStartDate(params), 2 + (index % 5))}T00:00:00`,
+    aba: bank.aba,
+    abaName: bank.abaName,
+    endpointNumber,
+    depositType: EDD_DEPOSIT_TYPES[Math.floor(rnd() * EDD_DEPOSIT_TYPES.length)],
+    endpointName: `${bank.abaName.split(",")[0]} ${armored}`,
+    depositDate: `${eddStartDate(params)}T19:37:16`,
+    depositAmount: 1_000_000 + Math.floor(rnd() * 9_000_000),
+    denomination,
+    denominationFound: null,
+    differenceType,
+    differenceAmount,
+    eddLoadID: index === 0 ? key.eddLoadID : 1000 + Math.floor(rnd() * 9000),
+    ncdwRecordID: index === 0 ? key.ncdwRecordID : 3003600000 + Math.floor(rnd() * 400000),
+  };
+}
+
+/** EDD summary: a page of EDD records + the report's reusable reportId. */
+function eddSummaryRows(params: TaskParams): MockPayload {
+  const key = primaryEddKey(params);
+  const countSeed = seeded(`edd:count:${key.eddLoadID}`);
+  const totalEdds = 5 + Math.floor(countSeed() * 20);
+  const pageSize = Math.max(1, Number(params.pageSize ?? 5));
+  const pageNumber = Math.max(1, Number(params.pageNumber ?? 1));
+  const count = Math.min(pageSize, totalEdds);
+  const rows = Array.from({ length: count }, (_, i) => eddSummaryRecord(params, i, key));
+  // reportId = the primary record's identifiers, which the detail call reuses (`/eddReport/detail/{reportId}`).
+  const reportId = (params.reportId as string) ?? `${key.eddLoadID}_${key.ncdwRecordID}`;
   return {
     rows,
     meta: {
-      period: period(params),
-      institutionFilter: params.institutionId ?? "ALL",
-      detail,
-      internal,
+      totalEdds,
       reportId,
+      aba: rows[0]?.aba,
+      endpointNumber: rows[0]?.endpointNumber,
+      denomination: params.denomination ?? rows[0]?.denomination,
+      differenceType: params.differenceType ?? rows[0]?.differenceType,
+      startDate: eddStartDate(params),
+      endDate: eddEndDate(params),
+      pageNumber,
+      pageSize,
       generatedRows: rows.length,
+      // Faithful raw API envelope for anyone inspecting the simulated response.
+      result: { totalEdds, reportDataList: rows },
+    },
+  };
+}
+
+/** EDD detail: expand one record (identified by reportId) into its nested sections. */
+function eddDetailRows(params: TaskParams, internal: boolean): MockPayload {
+  const fallback = primaryEddKey(params);
+  const reportId = (params.reportId as string) ?? `${fallback.eddLoadID}_${fallback.ncdwRecordID}`;
+  const [loadPart, ncdwPart] = String(reportId).split("_");
+  const rnd = seeded(`edd:detail:${reportId}`);
+
+  // Reconstruct the SAME summary record this reportId points at, so the detail is consistent with
+  // what the summary listed (the real workflow: detail of a specific summary row). A numeric
+  // `${eddLoadID}_${ncdwRecordID}` reportId reproduces the summary's primary record exactly.
+  const key: EddKey = /^\d+_\d+$/.test(reportId)
+    ? { eddLoadID: Number(loadPart), ncdwRecordID: Number(ncdwPart) }
+    : fallback;
+  const rec = eddSummaryRecord(params, 0, key);
+
+  const bank = { aba: String(rec.aba), abaName: String(rec.abaName) };
+  const endpointNumber = String(rec.endpointNumber);
+  const adminName = String(rec.endpointName);
+  const office = FRB_OFFICES[Math.floor(rnd() * FRB_OFFICES.length)]!;
+  const differenceDate = String(rec.differenceDate);
+  const depositDate = String(rec.depositDate);
+
+  const edd: Record<string, unknown> = {
+    differenceDetail: {
+      adviceNumber: rec.adviceNumber,
+      differenceDate,
+      denomination: rec.denomination,
+      denominationFound: null,
+      differenceDesc: rec.differenceType,
+      differenceAmount: rec.differenceAmount,
+    },
+    depositDetail: {
+      depositID: String(1_210_000_000 + Math.floor(rnd() * 999_999)),
+      depositDate,
+      depositAmount: rec.depositAmount,
+      depositType: rec.depositType,
+      ticketNumber: 100_000 + Math.floor(rnd() * 99_999),
+      diTellerID: null,
+      rsBankID: null,
+    },
+    adminAddress: {
+      abaName: bank.abaName,
+      adminName,
+      address: "800 MARKET ST MO1-800-04-15",
+      city: "St. Louis",
+      state: "MO",
+      zipCode: "63101",
+    },
+    forAccountAddress: {
+      endpointNumber,
+      abaName: bank.abaName,
+      endpointNameName: adminName,
+      address: "",
+      city: null,
+      state: null,
+      zipCode: null,
+    },
+    cashDeptAddress: { ...office },
+    additionalInfo: {
+      differenceID: String(1_211_000_000 + Math.floor(rnd() * 999_999)),
+      cuNumber: String(4000 + Math.floor(rnd() * 999)),
+      reelNumber: String(1 + Math.floor(rnd() * 99)),
+      shiftNumber: String(5000 + Math.floor(rnd() * 999)),
+      cpMachineNumber: String(300 + Math.floor(rnd() * 99)),
+      rsMachineNumber: null,
+      processingDT: differenceDate,
+      reconcilementDT: `${addDays(eddStartDate(params), 2)}T06:36:38`,
+    },
+    comments: null,
+    strapImage: null,
+    ...(internal ? { internalReview: { analystOverride: rnd() > 0.7, sarFlag: rec.differenceType === "Counterfeit" } } : {}),
+  };
+
+  // A flat projection of the record for the table view; the full nested record lives in meta.
+  const dd = edd.differenceDetail as Record<string, unknown>;
+  const dp = edd.depositDetail as Record<string, unknown>;
+  const ai = edd.additionalInfo as Record<string, unknown>;
+  const flatRow: Record<string, unknown> = {
+    adviceNumber: dd.adviceNumber,
+    differenceDate: dd.differenceDate,
+    denomination: dd.denomination,
+    differenceDesc: dd.differenceDesc,
+    differenceAmount: dd.differenceAmount,
+    depositID: dp.depositID,
+    depositAmount: dp.depositAmount,
+    depositType: dp.depositType,
+    ticketNumber: dp.ticketNumber,
+    abaName: bank.abaName,
+    endpointNumber,
+    frbOffice: office.frbOfficeName,
+    differenceID: ai.differenceID,
+    reelNumber: ai.reelNumber,
+    processingDT: ai.processingDT,
+  };
+
+  return {
+    rows: [flatRow],
+    meta: {
+      reportId,
+      eddLoadID: loadPart,
+      ncdwRecordID: ncdwPart,
+      internal,
+      generatedRows: 1,
+      edd,
+      // Faithful raw API envelope matching the sample detail response.
+      result: { reportDataList: [{ edd }] },
     },
   };
 }
@@ -142,11 +329,11 @@ function relationshipRows(params: TaskParams, scope: "abaGroup" | "aba"): MockPa
 /** Dispatch table: useCaseId -> payload generator. */
 export const MOCK_GENERATORS: Record<string, (p: TaskParams) => MockPayload> = {
   // EDD
-  eddSummaryReport: (p) => eddRows(p, false, false),
-  eddExportSummaryReport: (p) => eddRows(p, false, false),
-  eddDetailReport: (p) => eddRows(p, true, false),
-  eddExportDetailReport: (p) => eddRows(p, true, false),
-  eddExportDetailInternal: (p) => eddRows(p, true, true),
+  eddSummaryReport: (p) => eddSummaryRows(p),
+  eddExportSummaryReport: (p) => eddSummaryRows(p),
+  eddDetailReport: (p) => eddDetailRows(p, false),
+  eddExportDetailReport: (p) => eddDetailRows(p, false),
+  eddExportDetailInternal: (p) => eddDetailRows(p, true),
   // XShipReport
   xShipInstitution: (p) => xshipFeeRows(p, "summary"),
   xShipWaiver: (p) => xshipFeeRows(p, "detail"),
