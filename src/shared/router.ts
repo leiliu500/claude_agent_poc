@@ -34,6 +34,12 @@ const DENOMINATION_RE = /\bdenomination\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
 const DIFF_TYPE_RE = /\bdifference[_ ]?type\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
 const START_DATE_RE = /\bstart\s*date\s*[:#]?\s*(20\d{2}-\d{2}-\d{2})/i;
 const END_DATE_RE = /\bend\s*date\s*[:#]?\s*(20\d{2}-\d{2}-\d{2})/i;
+// EDD detail record identifiers the user can name directly to target one record. When both are
+// given the detail runs against reportId = `${eddLoadID}_${ncdwRecordID}` with no summary needed.
+// A directly-supplied report_id wins outright.
+const EDD_LOAD_ID_RE = /\bedd[_ ]?load[_ ]?id\s*[:=#]?\s*(\d+)/i;
+const NCDW_RECORD_ID_RE = /\bncdw[_ ]?record[_ ]?id\s*[:=#]?\s*(\d+)/i;
+const REPORT_ID_RE = /\breport[_ ]?id\s*[:=#]\s*([A-Za-z0-9][\w-]*)/i;
 
 /** Pull structured params out of the raw question. */
 export function extractParams(question: string): TaskParams {
@@ -76,6 +82,15 @@ export function extractParams(question: string): TaskParams {
   if (startExplicit) params.startDate = params.startDt = startExplicit[1];
   const endExplicit = question.match(END_DATE_RE);
   if (endExplicit) params.endDate = params.endDt = endExplicit[1];
+
+  // Target a specific EDD record for a detail report. A directly-supplied report_id is used as-is;
+  // otherwise eddLoadID + ncdwRecordID let the orchestrator compose the reportId without a summary.
+  const reportIdExplicit = question.match(REPORT_ID_RE);
+  if (reportIdExplicit) params.reportId = reportIdExplicit[1];
+  const loadId = question.match(EDD_LOAD_ID_RE);
+  if (loadId) params.eddLoadID = loadId[1];
+  const ncdw = question.match(NCDW_RECORD_ID_RE);
+  if (ncdw) params.ncdwRecordID = ncdw[1];
 
   if (/\b(export|download|csv|extract|file)\b/.test(q)) params.export = true;
   if (/\b(internal|confidential)\b/.test(q)) params.internal = true;

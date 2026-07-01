@@ -137,6 +137,20 @@ async function executeWithDependencies(tasks: TaskRequest[], opts: ExecuteOption
     }
 
     if (REPORT_ID_DEPENDENTS.has(task.useCase) && !present(task.params.reportId)) {
+      // 0. The user directly identified the target EDD record by its ids. Compose the reportId
+      //    from them and run the detail immediately — no summary, no memory lookup (they already
+      //    selected the record). This is the same `${eddLoadID}_${ncdwRecordID}` rule the summary
+      //    uses; here the ids come straight from the request.
+      if (present(task.params.eddLoadID) && present(task.params.ncdwRecordID)) {
+        const composed = `${task.params.eddLoadID}_${task.params.ncdwRecordID}`;
+        log.info("composing reportId from request-supplied eddLoadID + ncdwRecordID; skipping summary", {
+          useCase: task.useCase,
+          reportId: composed,
+        });
+        out.push(await executeTask({ ...task, params: { ...task.params, reportId: composed } }));
+        continue;
+      }
+
       const sig = eddSummarySig(task.params);
       let reportId: string | undefined;
 

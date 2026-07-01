@@ -22,10 +22,11 @@ Summary result shape (what eddSummaryReport returns):
 Each EDD record carries its own "eddLoadID" and "ncdwRecordID".
 
 reportId derivation (summary -> detail): the {reportId} for eddDetailReport / eddExportDetailReport
-is NOT stored and NOT fixed — it is built from a SELECTED summary record as
-`${eddLoadID}_${ncdwRecordID}` (e.g. 2233_3003696182). If a detail task arrives without a reportId,
-that means the summary must be run first and the id derived from the chosen record; surface which
-record's ids are needed rather than inventing a reportId.
+is NOT stored and NOT fixed — it is built from a SELECTED EDD record as `${eddLoadID}_${ncdwRecordID}`
+(e.g. 2233_3003696182). The record's ids can come from EITHER the summary result OR directly from the
+user's request. If the user supplies eddLoadID and ncdwRecordID (or a report_id) in the request,
+build/use that reportId directly — no summary needed. Otherwise run the summary first and derive the
+id from the chosen record; never invent a reportId.
 
 Behavior:
 - When the supervisor delegates a task, call `POST /run` with the given useCase and params.

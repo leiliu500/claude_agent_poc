@@ -420,6 +420,38 @@ describe("cross-session report memory", () => {
   });
 });
 
+describe("EDD detail from request-supplied record ids (no summary needed)", () => {
+  beforeEach(() => clearMemoryForTests());
+
+  it("routes eddLoadID/ncdwRecordID out of the question", () => {
+    const d = route("Generate detail report for eddLoadID=6321 and ncdwRecordID=3003698918");
+    expect(d.type).toBe("EDD");
+    const detail = d.tasks.find((t) => t.useCase === "eddDetailReport")!;
+    expect(detail.params.eddLoadID).toBe("6321");
+    expect(detail.params.ncdwRecordID).toBe("3003698918");
+  });
+
+  it("composes reportId = eddLoadID_ncdwRecordID and runs the detail WITHOUT a summary", async () => {
+    const lookup = await lookupUserIdentifiers("Lei Liu");
+    const auth: AuthContext = { userId: "1", userName: "Lei Liu", identifiers: lookup.identifiers };
+    const { results } = await orchestrate(
+      "Generate detail report for eddLoadID=6321 and ncdwRecordID=3003698918",
+      auth,
+    );
+    const useCases = results.map((r) => r.useCase);
+    expect(useCases).toContain("eddDetailReport");
+    expect(useCases).not.toContain("eddSummaryReport"); // record was given directly
+    const detail = results.find((r) => r.useCase === "eddDetailReport")!;
+    expect(String(detail.meta.endpoint)).toBe("/eddReport/detail/6321_3003698918");
+  });
+
+  it("uses an explicit report_id verbatim", () => {
+    const d = route("EDD detail report_id=6321_3003698918");
+    const detail = d.tasks.find((t) => t.useCase === "eddDetailReport")!;
+    expect(detail.params.reportId).toBe("6321_3003698918");
+  });
+});
+
 describe("EDD summary -> detail reportId derivation (the rule the agent applies)", () => {
   it("takes the selected summary record's eddLoadID + ncdwRecordID as the detail report_id", () => {
     const summary = {
