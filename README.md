@@ -72,11 +72,20 @@ terraform plan  -var "aws_region=us-east-1" -var "foundation_model=anthropic.cla
 terraform apply -var "aws_region=us-east-1" -var "foundation_model=anthropic.claude-3-5-sonnet-20240620-v1:0"
 ```
 
-Terraform outputs the API Gateway invoke URL. Then:
+Terraform outputs the API Gateway invoke URL. The `/v1/ask` route is gated by a token authorizer,
+so first log in to get a bearer token, then call `/v1/ask` with it. Identity + IDs (officeId, ABA,
+…) are carried in the token — you no longer put a user name or `office_id` in the question.
 
 ```bash
+# 1) Log in (demo creds seeded in db/schema.sql / the in-code directory).
+TOKEN=$(curl -s -X POST "$API_URL/v1/login" \
+  -H 'content-type: application/json' \
+  -d '{"username":"lliu","password":"Password123!"}' | jq -r .token)
+
+# 2) Ask, presenting the token. The authorizer verifies it and injects the caller's IDs.
 curl -s -X POST "$API_URL/v1/ask" \
   -H 'content-type: application/json' \
+  -H "authorization: Bearer $TOKEN" \
   -d '{"question":"Give me the EDD summary report for Q2 and export it","sessionId":"demo-1"}' | jq
 ```
 

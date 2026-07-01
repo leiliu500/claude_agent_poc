@@ -13,19 +13,29 @@
  *
  * Agent mode degrades gracefully: if the flow invocation fails, it falls back to local.
  */
-import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from "aws-lambda";
-import type { AskRequest, AskResponse, FinalReport } from "../../shared/types.js";
+import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
+import type { AskRequest, AskResponse, AuthContext, FinalReport } from "../../shared/types.js";
 import { orchestrate } from "../../shared/orchestrator.js";
-import { extractUserName, lookupUserIdentifiers } from "../../shared/user-directory.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
 import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
 
+/** Shape of the context our auth-authorizer Lambda attaches (all values are strings). */
+interface AuthorizerLambdaContext {
+  userId?: string;
+  userName?: string;
+  username?: string;
+  /** JSON-encoded identifiers map. */
+  ids?: string;
+}
+
+type AskEvent = APIGatewayProxyEventV2WithLambdaAuthorizer<AuthorizerLambdaContext>;
+
 const log = createLogger({ mod: "api-entrypoint" });
 
-function traceId(event: APIGatewayProxyEventV2): string {
+function traceId(event: AskEvent): string {
   return (
     event.requestContext?.requestId ??
     event.headers?.["x-amzn-trace-id"] ??
@@ -33,7 +43,7 @@ function traceId(event: APIGatewayProxyEventV2): string {
   );
 }
 
-function parseBody(event: APIGatewayProxyEventV2): AskRequest {
+function parseBody(event: AskEvent): AskRequest {
   let raw = event.body ?? "{}";
   if (event.isBase64Encoded) raw = Buffer.from(raw, "base64").toString("utf8");
   let parsed: unknown;
@@ -58,28 +68,25 @@ function respond(statusCode: number, body: AskResponse): APIGatewayProxyResultV2
 }
 
 /**
- * Validate that the request names a known user BEFORE any orchestration. A missing user name or an
- * unknown user is a 400 — the Supervisor's request-validation step, enforced at the API edge so it
- * holds in both agent and local modes. Returns the resolved identifiers for logging/telemetry.
+ * Read the authenticated caller from the API-Gateway Lambda authorizer's context. The authorizer
+ * has already verified the token signature + expiry, so an authorized request reaching here always
+ * carries a userId. Returns undefined only when the route is unauthenticated (no authorizer wired).
  */
-async function assertUserResolvable(question: string): Promise<void> {
-  const userName = extractUserName(question);
-  if (!userName) {
-    throw new ValidationError(
-      "A user name is required to run a report. Include it in your request, e.g. \"user name: Lei Liu\".",
-    );
+function readAuthContext(event: AskEvent): AuthContext | undefined {
+  const ctx = event.requestContext?.authorizer?.lambda;
+  if (!ctx || !ctx.userId) return undefined;
+  let identifiers: Record<string, string> = {};
+  try {
+    identifiers = ctx.ids ? (JSON.parse(ctx.ids) as Record<string, string>) : {};
+  } catch {
+    identifiers = {};
   }
-  const lookup = await lookupUserIdentifiers(userName);
-  if (!lookup.found) {
-    throw new ValidationError(
-      `Unknown user '${userName}'. No identifiers are on file for that name, so the report cannot be run.`,
-    );
-  }
+  return { userId: ctx.userId, userName: ctx.userName ?? ctx.username ?? "", identifiers };
 }
 
-/** Deterministic, in-process equivalent of the whole flow (validate user → orchestrate → report). */
-async function runLocal(question: string): Promise<FinalReport> {
-  const { type, results } = await orchestrate(question);
+/** Deterministic, in-process equivalent of the whole flow (identity → orchestrate → report). */
+async function runLocal(question: string, auth?: AuthContext): Promise<FinalReport> {
+  const { type, results } = await orchestrate(question, auth);
   const analytics = runAnalytics(results);
   return generateReport({
     question,
@@ -91,14 +98,14 @@ async function runLocal(question: string): Promise<FinalReport> {
 }
 
 /** Produce the final report via the Bedrock Flow, falling back to local on failure. */
-async function produceReport(question: string): Promise<FinalReport> {
+async function produceReport(question: string, auth?: AuthContext): Promise<FinalReport> {
   const mode = (process.env.ORCHESTRATION_MODE ?? "agent").toLowerCase();
   const flowId = process.env.FLOW_ID;
   const flowAliasId = process.env.FLOW_ALIAS_ID;
 
   if (mode === "local" || !flowId || !flowAliasId) {
     if (mode !== "local") log.warn("flow not configured; using local pipeline");
-    return runLocal(question);
+    return runLocal(question, auth);
   }
 
   // Bound the flow wait so a slow multi-agent dispatch degrades to the local pipeline within the
@@ -106,25 +113,29 @@ async function produceReport(question: string): Promise<FinalReport> {
   const timeoutMs = Number(process.env.FLOW_TIMEOUT_MS ?? "24000");
 
   try {
-    return await invokeFlow({ flowId, flowAliasId, question, timeoutMs });
+    // The authenticated identity + resolved IDs travel INTO the flow (document.auth) so the
+    // flow-process node can orchestrate without re-parsing a name from the question.
+    return await invokeFlow({ flowId, flowAliasId, question, auth, timeoutMs });
   } catch (err) {
     log.warn("flow invocation failed or timed out; falling back to local pipeline", { error: String(err) });
-    return runLocal(question);
+    return runLocal(question, auth);
   }
 }
 
-export const handler = async (event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> => {
+export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2> => {
   const trace = traceId(event);
   const reqLog = log.child({ trace });
   try {
     const { question } = parseBody(event);
-    reqLog.info("ask received", { question });
 
-    // Requirement: a user name must be present and known. Reject early (400) in every mode so a
-    // slow flow is never even started for an invalid request.
-    await assertUserResolvable(question);
+    // Identity comes from the verified session token (via the authorizer context), not the question
+    // text. If the authorizer is wired (production), an unauthenticated request never reaches here;
+    // readAuthContext returning undefined means the route is running without an authorizer (e.g.
+    // local dev), in which case orchestrate falls back to name-in-question resolution.
+    const auth = readAuthContext(event);
+    reqLog.info("ask received", { question, userId: auth?.userId, authenticated: Boolean(auth) });
 
-    const report = await produceReport(question);
+    const report = await produceReport(question, auth);
 
     reqLog.info("ask completed", { type: report.type, sections: report.sections.length });
     return respond(200, { ok: true, report, traceId: trace });

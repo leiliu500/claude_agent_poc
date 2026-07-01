@@ -1,9 +1,24 @@
-# Reporting Assistant — chat frontend
+# Fedline Assistant — chat frontend
 
 A zero-build, dependency-free chat UI (ChatGPT/Claude-style) for the Bedrock agentic
 reporting backend. It calls `POST /v1/ask { question }` and renders the structured
 `FinalReport` flexibly: a summary, per-section collapsible cards with highlights, the
 resolved backend REST endpoint, and a data table per task (plus a raw-JSON toggle).
+
+## Sign in (authentication + session)
+
+The API is gated: you **sign in first** and every request carries a bearer token.
+
+1. The login screen posts `POST /v1/login { username, password }`.
+2. On success the server returns a signed session token that already encodes the user's
+   `officeId`, ABA and other IDs — so you never type your name or `office_id` into a question.
+3. The token + user are kept in `localStorage`; each `POST /v1/ask` sends
+   `Authorization: Bearer <token>` and the API's authorizer injects those IDs server-side.
+4. The session lasts until the token expires (default 1h); past expiry — or on a 401 — the UI
+   clears the session and returns you to the login screen. Use **Sign out** (top bar) any time.
+
+Demo credentials (seeded in `db/schema.sql` / the in-code directory): `lliu` / `Password123!`
+and `jsmith` / `Password123!`. Rotate/replace these for any real deployment.
 
 ## Hosted (AWS)
 

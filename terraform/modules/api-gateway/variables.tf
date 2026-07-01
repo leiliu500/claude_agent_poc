@@ -27,6 +27,27 @@ variable "web_serve_function_name" {
   type        = string
 }
 
+# ── Auth: login endpoint + request authorizer ──────────────────────────────────
+variable "login_invoke_arn" {
+  description = "invoke_arn of the auth-login Lambda (POST /v1/login integration)."
+  type        = string
+}
+
+variable "login_function_name" {
+  description = "Function name of the auth-login Lambda (for the invoke permission)."
+  type        = string
+}
+
+variable "authorizer_invoke_arn" {
+  description = "invoke_arn of the auth-authorizer Lambda (verifies the bearer token on /v1/ask)."
+  type        = string
+}
+
+variable "authorizer_function_name" {
+  description = "Function name of the auth-authorizer Lambda (for the invoke permission)."
+  type        = string
+}
+
 variable "stage_name" {
   type    = string
   default = "v1"

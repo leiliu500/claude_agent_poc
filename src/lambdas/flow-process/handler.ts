@@ -19,7 +19,7 @@
  *
  * Output (to FlowOutput): FinalReport.
  */
-import type { AgentType, DispatchResult, FinalReport } from "../../shared/types.js";
+import type { AgentType, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
 import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
 import { orchestrate } from "../../shared/orchestrator.js";
@@ -30,8 +30,30 @@ import { createLogger } from "../../shared/logger.js";
 
 const log = createLogger({ mod: "flow-process-node" });
 
-/** Pull `question` and `agentResponse` out of the flow event, tolerating shape variants. */
-function readEvent(event: unknown): { question: string; agentResponse: string } {
+/** Coerce a raw flow value into an AuthContext, or undefined if absent/malformed. */
+function readAuth(raw: unknown): AuthContext | undefined {
+  let obj: unknown = raw;
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s || s === "null") return undefined;
+    try {
+      obj = JSON.parse(s);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!obj || typeof obj !== "object") return undefined;
+  const a = obj as Record<string, unknown>;
+  if (!a.userId) return undefined;
+  return {
+    userId: String(a.userId),
+    userName: typeof a.userName === "string" ? a.userName : "",
+    identifiers: (a.identifiers && typeof a.identifiers === "object" ? a.identifiers : {}) as Record<string, string>,
+  };
+}
+
+/** Pull `question`, `agentResponse` and the authenticated `auth` context out of the flow event. */
+function readEvent(event: unknown): { question: string; agentResponse: string; auth?: AuthContext } {
   const inputs = readFlowInputs(event);
   // Named inputs first; then fall back to the single mapped value (which may itself carry them).
   const single = inputs.single<Record<string, unknown> | string | undefined>();
@@ -41,13 +63,15 @@ function readEvent(event: unknown): { question: string; agentResponse: string } 
   const agentResponse = String(
     inputs.get("agentResponse") ?? obj.agentResponse ?? (typeof single === "string" ? single : ""),
   );
-  return { question, agentResponse };
+  const auth = readAuth(inputs.get("auth") ?? obj.auth);
+  return { question, agentResponse, auth };
 }
 
 /** Decide the dispatch results: prefer the supervisor's output, else deterministic local routing. */
 async function resolveResults(
   question: string,
   agentResponse: string,
+  auth?: AuthContext,
 ): Promise<{ type: AgentType; results: DispatchResult[]; source: string }> {
   const parsed = parseSupervisorOutput(agentResponse);
 
@@ -57,18 +81,23 @@ async function resolveResults(
   if (parsed.tasks.length > 0) {
     return { type: parsed.type, results: await executeTasks(parsed.tasks), source: "agent-tasks" };
   }
-  // Supervisor output unusable — deterministic orchestration over the original question
-  // (validates the user name, resolves their IDs, and sequences EDD summary → detail).
-  const { type, results } = await orchestrate(question);
+  // Supervisor output unusable — deterministic orchestration over the original question, using the
+  // authenticated identity + IDs carried in the flow's `auth` input (resolves IDs and sequences
+  // EDD summary → detail without needing a name in the question text).
+  const { type, results } = await orchestrate(question, auth);
   return { type, results, source: "local-orchestrator" };
 }
 
 export const handler = async (event: unknown): Promise<FinalReport> => {
-  const { question, agentResponse } = readEvent(event);
-  log.info("process invoked", { questionLen: question.length, agentResponseLen: agentResponse.length });
+  const { question, agentResponse, auth } = readEvent(event);
+  log.info("process invoked", {
+    questionLen: question.length,
+    agentResponseLen: agentResponse.length,
+    authenticated: Boolean(auth),
+  });
 
   try {
-    const { type, results, source } = await resolveResults(question, agentResponse);
+    const { type, results, source } = await resolveResults(question, agentResponse, auth);
     const analytics = runAnalytics(results);
     const report = generateReport({
       question,

@@ -242,10 +242,68 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.ghost:hover { background: var(--bg-soft); }
 
+/* ---------- Login gate ---------- */
+/* The `hidden` attribute MUST win over the `display:flex` rules below — otherwise toggling
+   `hidden` in JS has no effect and the login overlay never hides after sign-in. */
+.login-view[hidden], .app[hidden], .user-box[hidden] { display: none !important; }
+
+.login-view {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-soft);
+  z-index: 50;
+}
+.login-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 28px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-logo { font-size: 34px; text-align: center; }
+.login-card h1 { font-size: 20px; margin: 0; text-align: center; }
+.login-sub { margin: 0 0 4px; color: var(--text-soft); font-size: 13px; text-align: center; }
+.login-card .field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.login-card .field span { color: var(--text-soft); }
+.login-card .field input {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+}
+.login-card .field input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.login-btn { margin-top: 4px; width: 100%; }
+.login-error {
+  background: var(--accent-soft);
+  color: var(--danger);
+  border-radius: 9px;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+.login-hint { margin: 4px 0 0; color: var(--text-soft); font-size: 12px; text-align: center; min-height: 16px; }
+
+/* ---------- Signed-in user chip ---------- */
+.user-box { display: flex; align-items: center; gap: 8px; margin-left: 8px; }
+.user-name { font-size: 13px; color: var(--text-soft); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#logoutBtn { font-size: 13px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); }
+#logoutBtn:hover { background: var(--bg-soft); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
   .sidebar { position: absolute; z-index: 20; height: 100%; box-shadow: var(--shadow); }
   .sidebar.collapsed { margin-left: -280px; }
   .subtitle { display: none; }
   .status { max-width: 120px; }
+  .user-name { display: none; }
 }

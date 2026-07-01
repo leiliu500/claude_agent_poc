@@ -18,6 +18,8 @@ const require = createRequire(import.meta.url);
 // Each entry => one deployable Lambda artifact (matched by name in Terraform).
 const LAMBDAS = [
   { name: "api-entrypoint", entry: "src/lambdas/api-entrypoint/handler.ts" },
+  { name: "auth-login", entry: "src/lambdas/auth-login/handler.ts" },
+  { name: "auth-authorizer", entry: "src/lambdas/auth-authorizer/handler.ts" },
   { name: "action-edd", entry: "src/lambdas/action-groups/edd/handler.ts" },
   { name: "action-xship-report", entry: "src/lambdas/action-groups/xship-report/handler.ts" },
   { name: "action-xship-download", entry: "src/lambdas/action-groups/xship-download/handler.ts" },

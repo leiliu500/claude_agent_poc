@@ -45,19 +45,29 @@ SET search_path TO fedline, public;
 -- One row per requesting user. `full_name` is what the chat user types
 -- ("Lei Liu"); it is matched case-insensitively by the lookup function.
 CREATE TABLE IF NOT EXISTS fedline.app_user (
-    user_id     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    full_name   TEXT        NOT NULL,
-    username    TEXT,
-    email       TEXT,
-    status      TEXT        NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'inactive', 'suspended')),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    user_id       BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    full_name     TEXT        NOT NULL,
+    username      TEXT,
+    email         TEXT,
+    -- Login credential: a self-describing scrypt hash string produced by shared/auth.hashPassword
+    -- ("scrypt$N$r$p$saltHex$hashHex"). Never store plaintext. NULL = login disabled for this user.
+    password_hash TEXT,
+    status        TEXT        NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'inactive', 'suspended')),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Idempotent add for databases created before credentials existed.
+ALTER TABLE fedline.app_user ADD COLUMN IF NOT EXISTS password_hash TEXT;
 
 -- Case-insensitive uniqueness on the display name we look users up by.
 CREATE UNIQUE INDEX IF NOT EXISTS app_user_full_name_lower_idx
     ON fedline.app_user (lower(full_name));
+
+-- Case-insensitive uniqueness on the login handle (used by get_user_auth for authentication).
+CREATE UNIQUE INDEX IF NOT EXISTS app_user_username_lower_idx
+    ON fedline.app_user (lower(username));
 
 -- ── User identifiers ─────────────────────────────────────────────────────────
 -- The many IDs a single user owns. Key/value keyed by `id_type` so new param
@@ -109,17 +119,37 @@ AS $$
     LIMIT  1;
 $$;
 
+-- ── Authentication lookup ─────────────────────────────────────────────────────
+-- Resolve a LOGIN HANDLE (username) to the row the login Lambda needs to verify a
+-- password: (user_id, full_name, password_hash). Returns no rows for an unknown or
+-- inactive user. The Lambda verifies the scrypt hash itself (in shared/auth) and,
+-- on success, calls get_user_identifiers(full_name) to fill the session token.
+CREATE OR REPLACE FUNCTION fedline.get_user_auth(p_username TEXT)
+RETURNS TABLE (user_id BIGINT, full_name TEXT, password_hash TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT u.user_id, u.full_name, u.password_hash
+    FROM   fedline.app_user u
+    WHERE  lower(u.username) = lower(btrim(p_username))
+    AND    u.status = 'active'
+    LIMIT  1;
+$$;
+
 -- ============================================================================
 -- Seed data
 -- ============================================================================
 
--- Example user: Lei Liu
-INSERT INTO fedline.app_user (full_name, username, email)
-VALUES ('Lei Liu', 'lliu', 'ttoulliu2002@gmail.com')
+-- Example user: Lei Liu. Demo password is "Password123!" (scrypt hash below — the SAME string the
+-- in-code directory mirror uses; see src/shared/user-directory.ts). Rotate in real deployments.
+INSERT INTO fedline.app_user (full_name, username, email, password_hash)
+VALUES ('Lei Liu', 'lliu', 'ttoulliu2002@gmail.com',
+        'scrypt$16384$8$1$4e95fe52bac616715279bdcf9158b451$7180a85c78347901d1179b8f415e1687240b3ed26e9a132e9d65a7b22ab7d585')
 ON CONFLICT (lower(full_name)) DO UPDATE
-    SET username = EXCLUDED.username,
-        email    = EXCLUDED.email,
-        updated_at = now();
+    SET username      = EXCLUDED.username,
+        email         = EXCLUDED.email,
+        password_hash = EXCLUDED.password_hash,
+        updated_at    = now();
 
 -- All the IDs that fill the downstream collaborator API calls for Lei Liu.
 -- id_type names == TaskParams field names (src/shared/types.ts).
@@ -127,6 +157,9 @@ INSERT INTO fedline.user_identifier (user_id, id_type, id_value, label)
 SELECT u.user_id, v.id_type, v.id_value, v.label
 FROM   fedline.app_user u
 CROSS  JOIN (VALUES
+    -- Office the user belongs to — now resolved at login and carried in the session token
+    -- (previously request-supplied; the chat user no longer types it).
+    ('officeId',       '12345',                   'Requesting user''s office id'),
     -- Relationship / shared ABA identifiers
     ('abaNumber',      '000001',                  '9-digit ABA routing number'),
     ('abaGroup',       'GRP-100',                 'ABA group identifier'),
@@ -152,14 +185,19 @@ ON CONFLICT (user_id, id_type) DO UPDATE
         label    = EXCLUDED.label;
 
 -- A second example user (sparser entitlements) to exercise multi-user lookup.
-INSERT INTO fedline.app_user (full_name, username, email)
-VALUES ('Jordan Smith', 'jsmith', NULL)
-ON CONFLICT (lower(full_name)) DO NOTHING;
+-- Demo password is also "Password123!" (distinct scrypt salt/hash).
+INSERT INTO fedline.app_user (full_name, username, email, password_hash)
+VALUES ('Jordan Smith', 'jsmith', NULL,
+        'scrypt$16384$8$1$99e607407b770fcc2ad30efd3a7e9d7d$51d40ebe49da36302092693402fa883074e35cf381eefe963a25f9c236b6cee8')
+ON CONFLICT (lower(full_name)) DO UPDATE
+    SET password_hash = EXCLUDED.password_hash,
+        updated_at    = now();
 
 INSERT INTO fedline.user_identifier (user_id, id_type, id_value, label)
 SELECT u.user_id, v.id_type, v.id_value, v.label
 FROM   fedline.app_user u
 CROSS  JOIN (VALUES
+    ('officeId',      '67890',       'Requesting user''s office id'),
     ('abaNumber',     '000002',      '9-digit ABA routing number'),
     ('abaGroup',      'GRP-200',     'ABA group identifier'),
     ('userAba',       '000002',      'Requesting user''s ABA'),
