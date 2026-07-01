@@ -1,27 +1,54 @@
-/* Reporting Assistant — chat logic + flexible FinalReport rendering. No dependencies. */
+/* Fedline Assistant — login + session, chat logic, flexible FinalReport rendering. No dependencies. */
 (() => {
   "use strict";
 
   // ---------- Config (persisted in localStorage) ----------
-  const DEFAULT_ENDPOINT = "https://9r7fg2qut2.execute-api.us-gov-west-1.amazonaws.com/v1/ask";
-  // When the UI is served from the API Gateway itself (hosted at /app), call the API same-origin
-  // so the bundle is environment-agnostic. For local dev (localhost/file), use the known URL.
-  function defaultEndpoint() {
+  const DEFAULT_ENDPOINT = "https://9hixvh0jxd.execute-api.us-gov-west-1.amazonaws.com/v1/ask";
+  // When the UI is served from the API Gateway itself (hosted at /app), the API is same-origin by
+  // construction. Return that so the bundle is environment-agnostic — and, crucially, so a stale
+  // `ra.endpoint` saved by a PREVIOUS deployment (a now-dead API URL) can't break login/ask.
+  function hostedEndpoint() {
     if (/\.execute-api\..*\.amazonaws\.com$/.test(location.hostname) && location.pathname.startsWith("/app")) {
       return location.origin + "/v1/ask";
     }
-    return DEFAULT_ENDPOINT;
+    return null;
   }
+  // Precedence: hosted same-origin (authoritative) > saved override (local dev) > baked-in default.
+  const hosted = hostedEndpoint();
   const cfg = {
-    endpoint: localStorage.getItem("ra.endpoint") || defaultEndpoint(),
+    endpoint: hosted || localStorage.getItem("ra.endpoint") || DEFAULT_ENDPOINT,
     timeoutSec: Number(localStorage.getItem("ra.timeoutSec") || "60"),
   };
+  // Heal a stale saved endpoint so Settings shows the correct one too.
+  if (hosted && localStorage.getItem("ra.endpoint") && localStorage.getItem("ra.endpoint") !== hosted) {
+    localStorage.setItem("ra.endpoint", hosted);
+  }
+  // The login endpoint is the sibling of the ask endpoint (…/v1/ask → …/v1/login).
+  const loginEndpoint = () => cfg.endpoint.replace(/\/v1\/ask\b.*$/, "/v1/login");
 
+  // ---------- Session ----------
+  // After login we hold { token, expiresAt (epoch seconds), user } here + in localStorage so a
+  // page reload keeps the session until the token expires. Past expiry the user must log in again.
+  const SESSION_KEY = "ra.session";
+  let session = null;      // in-memory copy of the active session
+  let expiryTimer = null;  // fires at token expiry to force re-login
+
+  function loadSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+      if (s && s.token && typeof s.expiresAt === "number") return s;
+    } catch { /* ignore */ }
+    return null;
+  }
+  const sessionValid = (s) => Boolean(s && s.token && s.expiresAt * 1000 > Date.now());
+
+  // Examples no longer carry IDs — the signed-in user's officeId/ABA/etc. are attached server-side
+  // from their session token, so requests stay short and identity can't be spoofed in the text.
   const EXAMPLES = [
-    "Run the EDD summary report with officeId OFF1, userAba 111111111, aba 222222222, endpoint wire, denomination USD, differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
+    "Run the EDD summary report for endpoint wire, denomination USD, differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
     "Give me the EDD detail report and export it for 2026-Q2.",
     "XShip fee summary and fee detail for 2026-Q2.",
-    "Download shipping activity by ABA 123456789 for zone B1.",
+    "Download shipping activity for zone B1.",
     "What is the ABA group relationship in the xshi file for group 100?",
     "Export the XShip fee summary for 2026-Q2 as Excel.",
     "Give me the EDD detail report for 2026-Q2 as PDF.",
@@ -36,6 +63,17 @@
   const formEl = $("composerForm");
   const sendBtn = $("sendBtn");
   const connStatus = $("connStatus");
+  const appEl = $("app");
+  const loginView = $("loginView");
+  const loginForm = $("loginForm");
+  const loginUser = $("loginUser");
+  const loginPass = $("loginPass");
+  const loginError = $("loginError");
+  const loginBtn = $("loginBtn");
+  const loginHint = $("loginHint");
+  const userBox = $("userBox");
+  const userNameEl = $("userName");
+  const logoutBtn = $("logoutBtn");
 
   let busy = false;
   const history = []; // { role, content|report|error }
@@ -352,7 +390,12 @@
     try {
       const res = await fetch(cfg.endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          // The session token authorizes the request at the API edge; the server reads the
+          // caller's office/ABA/etc. from it — the question no longer carries identity.
+          ...(session ? { authorization: "Bearer " + session.token } : {}),
+        },
         body: JSON.stringify({ question }),
         signal: controller.signal,
       });
@@ -371,6 +414,13 @@
     question = question.trim();
     if (!question) return;
 
+    // Enforce the session client-side too: if the token has expired, force a fresh login before
+    // sending (the server would reject it anyway; this gives a clean UX).
+    if (!sessionValid(session)) {
+      endSession("Your session has expired. Please sign in again.");
+      return;
+    }
+
     busy = true;
     sendBtn.disabled = true;
     addUserMessage(question);
@@ -383,7 +433,11 @@
     try {
       const { httpStatus, data } = await callApi(question);
 
-      if (data && data.ok && data.report) {
+      if (httpStatus === 401 || httpStatus === 403) {
+        // Token rejected by the authorizer (expired/invalid) — drop the session and re-gate.
+        ph.setContent(renderError("Session expired", "Please sign in again to continue."));
+        endSession("Your session has expired. Please sign in again.");
+      } else if (data && data.ok && data.report) {
         const node = renderReport(data.report);
         // If the user asked for a specific format, return it in that format (download/print),
         // while still showing the table preview by default.
@@ -463,9 +517,101 @@
     }
   });
 
+  // ---------- Auth: login / logout / session lifecycle ----------
+  function showLogin() {
+    loginView.hidden = false;
+    appEl.hidden = true;
+    userBox.hidden = true;
+    loginPass.value = "";
+    setTimeout(() => loginUser.focus(), 0);
+  }
+
+  function showApp() {
+    loginView.hidden = true;
+    appEl.hidden = false;
+    userBox.hidden = false;
+    userNameEl.textContent = (session && session.user && session.user.fullName) || "Signed in";
+    autosize();
+    inputEl.focus();
+  }
+
+  // Fire an auto-logout exactly when the token expires, so an idle tab returns to the login screen.
+  function scheduleExpiry() {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    if (!session) return;
+    const ms = session.expiresAt * 1000 - Date.now();
+    // setTimeout caps around ~24.8 days; our tokens are far shorter, so this is safe.
+    expiryTimer = setTimeout(() => endSession("Your session has expired. Please sign in again."), Math.max(0, ms));
+  }
+
+  function startSession(s) {
+    session = s;
+    localStorage.setItem(SESSION_KEY, JSON.stringify(s));
+    scheduleExpiry();
+    showApp();
+  }
+
+  function endSession(message) {
+    session = null;
+    localStorage.removeItem(SESSION_KEY);
+    if (expiryTimer) { clearTimeout(expiryTimer); expiryTimer = null; }
+    // Reset the conversation so the next user starts clean.
+    messagesEl.innerHTML = "";
+    history.length = 0;
+    welcomeEl.classList.remove("hidden");
+    loginError.hidden = true;
+    if (message) { loginHint.textContent = message; }
+    showLogin();
+  }
+
+  async function doLogin(username, password) {
+    loginError.hidden = true;
+    loginHint.textContent = "";
+    loginBtn.disabled = true;
+    loginBtn.textContent = "Signing in…";
+    try {
+      const res = await fetch(loginEndpoint(), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok && data.token) {
+        startSession({ token: data.token, expiresAt: data.expiresAt, user: data.user });
+      } else {
+        loginError.textContent = data.error || `Sign-in failed (HTTP ${res.status}).`;
+        loginError.hidden = false;
+      }
+    } catch (err) {
+      loginError.textContent = "Could not reach the login service. Check the API endpoint in Settings.";
+      loginError.hidden = false;
+    } finally {
+      loginBtn.disabled = false;
+      loginBtn.textContent = "Sign in";
+    }
+  }
+
+  loginForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const u = loginUser.value.trim();
+    const p = loginPass.value;
+    if (u && p) doLogin(u, p);
+  });
+  logoutBtn.addEventListener("click", () => endSession());
+
   // ---------- Init ----------
   buildExamples();
   renderStatus();
   autosize();
-  inputEl.focus();
+
+  // Gate on the session: a valid stored token skips the login screen; otherwise show login.
+  session = loadSession();
+  if (sessionValid(session)) {
+    scheduleExpiry();
+    showApp();
+  } else {
+    session = null;
+    localStorage.removeItem(SESSION_KEY);
+    showLogin();
+  }
 })();

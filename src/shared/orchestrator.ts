@@ -16,7 +16,7 @@
  * deterministic fallback. The real Bedrock supervisor performs the same steps via the DBAgent and
  * collaborator agents; this is the reference implementation and the test seam.
  */
-import type { AgentType, DispatchResult, TaskParams, TaskRequest } from "./types.js";
+import type { AgentType, AuthContext, DispatchResult, TaskParams, TaskRequest } from "./types.js";
 import { route } from "./router.js";
 import { executeTask } from "./dispatch.js";
 import { extractUserName, lookupUserIdentifiers } from "./user-directory.js";
@@ -99,36 +99,59 @@ async function executeWithDependencies(tasks: TaskRequest[]): Promise<DispatchRe
 }
 
 /**
- * Run the full supervisor-equivalent pipeline for a question. Throws ValidationError when no user
- * name is present or the user is unknown — the API boundary maps that to a 400.
+ * Resolve the requesting user's name + identifiers for a request.
+ *
+ *   - Authenticated path (preferred): identity comes from the verified session token (`auth`), so
+ *     the chat user never types their name or IDs. No lookup is needed — the token already carries
+ *     the identifiers resolved at login.
+ *   - Legacy/no-auth path (tests, ORCHESTRATION_MODE=local without a token): fall back to pulling a
+ *     user name out of the question text and resolving IDs via the directory. Throws
+ *     ValidationError when no user is identifiable — the API boundary maps that to a 400.
  */
-export async function orchestrate(question: string): Promise<OrchestrationResult> {
+async function resolveIdentity(
+  question: string,
+  auth?: AuthContext,
+): Promise<{ userName: string; identifiers: Record<string, string> }> {
+  if (auth) {
+    return { userName: auth.userName, identifiers: auth.identifiers ?? {} };
+  }
+
   const userName = extractUserName(question);
   if (!userName) {
     throw new ValidationError(
-      "A user name is required to run a report. Include it in your request, e.g. \"user name: Lei Liu\".",
+      "A user name is required to run a report. Sign in so your identity and IDs are attached automatically.",
     );
   }
-
   const lookup = await lookupUserIdentifiers(userName);
   if (!lookup.found) {
     throw new ValidationError(
       `Unknown user '${userName}'. No identifiers are on file for that name, so the report cannot be run.`,
     );
   }
+  return { userName: lookup.fullName ?? userName, identifiers: lookup.identifiers };
+}
+
+/**
+ * Run the full supervisor-equivalent pipeline for a question. When `auth` is provided (an
+ * authenticated request), the caller's identity + identifiers come from the verified token;
+ * otherwise identity is parsed from the question text (legacy/test path).
+ */
+export async function orchestrate(question: string, auth?: AuthContext): Promise<OrchestrationResult> {
+  const { userName, identifiers } = await resolveIdentity(question, auth);
 
   const decision = route(question);
   const tasks: TaskRequest[] = decision.tasks.map((t) => ({
     ...t,
-    params: mergeParams(lookup.identifiers, t.params),
+    params: mergeParams(identifiers, t.params),
   }));
 
   log.info("orchestrating", {
-    userName: lookup.fullName ?? userName,
+    userName,
+    authenticated: Boolean(auth),
     type: decision.type,
     tasks: tasks.map((t) => t.useCase),
   });
 
   const results = await executeWithDependencies(tasks);
-  return { type: decision.type, userName: lookup.fullName ?? userName, results };
+  return { type: decision.type, userName, results };
 }

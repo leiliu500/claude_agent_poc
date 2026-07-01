@@ -1,6 +1,11 @@
 output "api_ask_url" {
-  description = "POST your { question } here."
+  description = "POST your { question } here (requires a bearer token from /v1/login)."
   value       = module.api_gateway.ask_url
+}
+
+output "api_login_url" {
+  description = "POST { username, password } here to obtain a session token."
+  value       = module.api_gateway.login_url
 }
 
 output "web_app_url" {

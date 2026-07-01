@@ -166,3 +166,33 @@ export interface AskResponse {
   error?: string;
   traceId: string;
 }
+
+/** The authenticated caller, resolved from the session token by the API-Gateway authorizer and
+ *  handed to the entrypoint. Replaces parsing the user name + IDs out of the question text. */
+export interface AuthContext {
+  userId: string;
+  userName: string;
+  /** Resolved identifiers (officeId, userAba, aba, ...), keyed by TaskParams field name. */
+  identifiers: Record<string, string>;
+}
+
+/** Request body for POST /v1/login. */
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+/** Response body for POST /v1/login. On success the client stores the token + user for its session. */
+export interface LoginResponse {
+  ok: boolean;
+  token?: string;
+  /** Token expiry as epoch seconds — the client re-logs-in when the clock passes it. */
+  expiresAt?: number;
+  user?: {
+    userId: string;
+    username: string;
+    fullName: string;
+    identifiers: Record<string, string>;
+  };
+  error?: string;
+}

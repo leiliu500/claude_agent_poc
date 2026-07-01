@@ -7,7 +7,28 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app">
+    <!-- Login gate: shown until a valid session exists; the app is hidden behind it. -->
+    <div class="login-view" id="loginView" hidden>
+      <form class="login-card" id="loginForm">
+        <div class="login-logo">🔐</div>
+        <h1>Fedline Assistant</h1>
+        <p class="login-sub">Sign in to run EDD, XShip and Relationship analyses. Your office and IDs
+           are attached automatically once you sign in.</p>
+        <label class="field">
+          <span>Username</span>
+          <input type="text" id="loginUser" autocomplete="username" required autofocus />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" id="loginPass" autocomplete="current-password" required />
+        </label>
+        <div class="login-error" id="loginError" hidden></div>
+        <button type="submit" class="btn primary login-btn" id="loginBtn">Sign in</button>
+        <p class="login-hint" id="loginHint"></p>
+      </form>
+    </div>
+
+    <div class="app" id="app" hidden>
       <!-- Sidebar -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
@@ -33,6 +54,10 @@
             <span class="subtitle">EDD · XShip · Relationship — Bedrock agentic backend</span>
           </div>
           <div class="status" id="connStatus" title="API endpoint">…</div>
+          <div class="user-box" id="userBox" hidden>
+            <span class="user-name" id="userName" title="Signed in"></span>
+            <button class="icon-btn" id="logoutBtn" title="Sign out">Sign out</button>
+          </div>
         </header>
 
         <section class="chat" id="chat">

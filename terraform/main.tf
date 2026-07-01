@@ -110,6 +110,28 @@ module "lambda_workers" {
       memory_size = var.lambda_memory_mb
       description = "Flow node: combined dispatch+analytics+report."
     }
+    # ── Auth: login endpoint + request authorizer (see auth.tf for the shared secret/locals) ──
+    "auth-login" = {
+      zip_path = "${var.dist_dir}/auth-login.zip"
+      role_arn = local.auth_login_role_arn
+      environment = merge(local.auth_common_env, local.db_lambda_env, {
+        AUTH_TOKEN_TTL_SECONDS = local.auth_token_ttl_seconds
+      })
+      # Reaches the user store — attach to the DB VPC when the database is enabled (else no VPC).
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = var.lambda_timeout_seconds
+      memory_size            = var.lambda_memory_mb
+      description            = "Login: verify credentials and mint a signed session token carrying the user's IDs."
+    }
+    "auth-authorizer" = {
+      zip_path    = "${var.dist_dir}/auth-authorizer.zip"
+      role_arn    = module.iam.lambda_basic_role_arn
+      environment = local.auth_common_env
+      timeout     = 10
+      memory_size = var.lambda_memory_mb
+      description = "API Gateway request authorizer: verify the bearer token, inject the caller's IDs."
+    }
   }
 }
 
@@ -180,5 +202,12 @@ module "api_gateway" {
   entrypoint_function_name = module.lambda_entrypoint.function_names["api-entrypoint"]
   web_serve_invoke_arn     = module.lambda_web.invoke_arns["web-serve"]
   web_serve_function_name  = module.lambda_web.function_names["web-serve"]
-  tags                     = local.common_tags
+
+  # Auth: login integration + the token authorizer that gates POST /v1/ask.
+  login_invoke_arn         = module.lambda_workers.invoke_arns["auth-login"]
+  login_function_name      = module.lambda_workers.function_names["auth-login"]
+  authorizer_invoke_arn    = module.lambda_workers.invoke_arns["auth-authorizer"]
+  authorizer_function_name = module.lambda_workers.function_names["auth-authorizer"]
+
+  tags = local.common_tags
 }

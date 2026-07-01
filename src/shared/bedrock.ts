@@ -10,7 +10,7 @@ import {
   InvokeAgentCommand,
   InvokeFlowCommand,
 } from "@aws-sdk/client-bedrock-agent-runtime";
-import type { FinalReport } from "./types.js";
+import type { AuthContext, FinalReport } from "./types.js";
 import { UpstreamError } from "./errors.js";
 import { createLogger } from "./logger.js";
 
@@ -65,6 +65,9 @@ export async function invokeFlow(args: {
   flowId: string;
   flowAliasId: string;
   question: string;
+  /** Verified caller identity + resolved IDs, forwarded into the flow so the process node can
+   *  orchestrate without re-parsing a user name from the question. */
+  auth?: AuthContext;
   /** Abort the flow wait after this many ms so the caller can fall back within its own deadline. */
   timeoutMs?: number;
 }): Promise<FinalReport> {
@@ -75,7 +78,10 @@ export async function invokeFlow(args: {
       {
         nodeName: "FlowInput",
         nodeOutputName: "document",
-        content: { document: { question: args.question } },
+        // `auth` travels as a JSON string (a valid flow document scalar) — the Process node's `auth`
+        // input is typed String and flow-process JSON-parses it. This avoids passing a structured
+        // object between flow nodes, which has proven fragile in this pipeline.
+        content: { document: { question: args.question, auth: args.auth ? JSON.stringify(args.auth) : "" } },
       },
     ],
   });

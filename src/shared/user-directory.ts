@@ -14,6 +14,7 @@
  * merges straight into a task's params with no translation layer.
  */
 import { createLogger } from "./logger.js";
+import { verifyPassword } from "./auth.js";
 
 const log = createLogger({ mod: "user-directory" });
 
@@ -28,15 +29,34 @@ export interface UserLookup {
 
 /**
  * In-code mirror of db/schema.sql seed data. SINGLE SOURCE OF TRUTH for the no-database path.
- * Keep in sync with the INSERTs in db/schema.sql. Keys = TaskParams field names.
+ * Keep in sync with the INSERTs in db/schema.sql. `identifiers` keys = TaskParams field names.
  *
- * Note: officeId and the date range are REQUEST-supplied (not stored), and reportId is
- * RUNTIME-derived from an eddSummaryReport result — none of those live here. See db/schema.sql.
+ * `username` + `passwordHash` back the login flow (see credentials below); the scrypt hashes here
+ * are the SAME strings seeded into fedline.app_user so the in-memory and Postgres paths accept the
+ * same credentials. Demo password for both seed users is "Password123!".
+ *
+ * `officeId` is now stored per user (resolved at login and carried in the session token) so the
+ * chat user no longer types it. `startDate`/`endDate` remain request-supplied and `reportId` is
+ * runtime-derived — neither lives here. See db/schema.sql.
  */
-const DIRECTORY: ReadonlyArray<{ fullName: string; identifiers: Record<string, string> }> = [
+interface DirectoryEntry {
+  userId: string;
+  fullName: string;
+  username: string;
+  /** scrypt$... hash produced by shared/auth.hashPassword. */
+  passwordHash: string;
+  identifiers: Record<string, string>;
+}
+
+const DIRECTORY: ReadonlyArray<DirectoryEntry> = [
   {
+    userId: "1",
     fullName: "Lei Liu",
+    username: "lliu",
+    passwordHash:
+      "scrypt$16384$8$1$4e95fe52bac616715279bdcf9158b451$7180a85c78347901d1179b8f415e1687240b3ed26e9a132e9d65a7b22ab7d585",
     identifiers: {
+      officeId: "12345",
       abaNumber: "000001",
       abaGroup: "GRP-100",
       aba: "011000015",
@@ -53,8 +73,13 @@ const DIRECTORY: ReadonlyArray<{ fullName: string; identifiers: Record<string, s
     },
   },
   {
+    userId: "2",
     fullName: "Jordan Smith",
+    username: "jsmith",
+    passwordHash:
+      "scrypt$16384$8$1$99e607407b770fcc2ad30efd3a7e9d7d$51d40ebe49da36302092693402fa883074e35cf381eefe963a25f9c236b6cee8",
     identifiers: {
+      officeId: "67890",
       abaNumber: "000002",
       abaGroup: "GRP-200",
       userAba: "000002",
@@ -123,6 +148,84 @@ export async function lookupUserIdentifiers(userName: string): Promise<UserLooku
     }
   }
   return lookupInMemory(userName);
+}
+
+// ── Credential verification (login) ───────────────────────────────────────────
+
+/** Outcome of a login attempt. `ok=false` deliberately does NOT say whether the user or the
+ *  password was wrong — the login Lambda returns a single generic 401 either way. */
+export interface CredentialCheck {
+  ok: boolean;
+  userId?: string;
+  fullName?: string;
+  username?: string;
+  identifiers: Record<string, string>;
+}
+
+const FAIL: CredentialCheck = { ok: false, identifiers: {} };
+
+/** Verify credentials against the in-code directory (no-database path). */
+function verifyInMemory(username: string, password: string): CredentialCheck {
+  const hit = DIRECTORY.find((u) => norm(u.username) === norm(username));
+  if (!hit || !verifyPassword(password, hit.passwordHash)) return FAIL;
+  return {
+    ok: true,
+    userId: hit.userId,
+    fullName: hit.fullName,
+    username: hit.username,
+    identifiers: { ...hit.identifiers },
+  };
+}
+
+/**
+ * Verify credentials against Postgres: fetch (user_id, full_name, password_hash) for the login
+ * handle via fedline.get_user_auth(), check the scrypt hash, then load the user's identifiers.
+ * Throws on connection/query failure so the caller can fall back to the in-memory mirror.
+ */
+async function verifyPostgres(username: string, password: string, databaseUrl: string): Promise<CredentialCheck> {
+  const pgModule = "pg";
+  const pg = (await import(pgModule)) as unknown as { Pool: new (cfg: { connectionString: string }) => PgPool };
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  try {
+    const authRes = await pool.query<{ user_id: string; full_name: string; password_hash: string | null }>(
+      "SELECT user_id, full_name, password_hash FROM fedline.get_user_auth($1)",
+      [username],
+    );
+    const row = authRes.rows[0];
+    if (!row || !row.password_hash || !verifyPassword(password, row.password_hash)) return FAIL;
+
+    const idRes = await pool.query<{ identifiers: Record<string, string> }>(
+      "SELECT fedline.get_user_identifiers($1) AS identifiers",
+      [row.full_name],
+    );
+    return {
+      ok: true,
+      userId: String(row.user_id),
+      fullName: row.full_name,
+      username,
+      identifiers: idRes.rows[0]?.identifiers ?? {},
+    };
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Verify a login (username + password) and, on success, return the user's stored identifiers ready
+ * to embed in a session token. Uses Postgres when DATABASE_URL is set (degrading to the in-memory
+ * mirror on a Postgres failure), else the in-code directory.
+ */
+export async function verifyUserCredentials(username: string, password: string): Promise<CredentialCheck> {
+  if (!username || !password) return FAIL;
+  const databaseUrl = process.env.DATABASE_URL;
+  if (databaseUrl) {
+    try {
+      return await verifyPostgres(username, password, databaseUrl);
+    } catch (err) {
+      log.warn("postgres credential check failed; falling back to in-memory directory", { error: String(err) });
+    }
+  }
+  return verifyInMemory(username, password);
 }
 
 // ── User-name extraction ──────────────────────────────────────────────────────

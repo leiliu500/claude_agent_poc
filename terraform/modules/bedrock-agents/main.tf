@@ -73,11 +73,12 @@ resource "aws_bedrockagent_agent" "supervisor" {
   instruction                 = var.supervisor_instruction
   idle_session_ttl_in_seconds = var.idle_session_ttl_seconds
   agent_collaboration         = "SUPERVISOR"
-  # Prepare on create AND on update (e.g. foundation_model swap) so the DRAFT is recompiled;
-  # the collaborator links below also re-prepare it once they exist. Without this, a model
-  # change updates the DRAFT config but never recompiles it, so the alias keeps snapshotting
-  # the stale prepared artifact.
-  prepare_agent = true
+  # MUST be false: a SUPERVISOR agent cannot be prepared until it has collaborators, but the
+  # collaborator links are created AFTER this resource. Preparing on create therefore fails with
+  # "AgentCollaboration is set to SUPERVISOR but no agent collaborators are added". The links below
+  # each carry prepare_agent=true, so the supervisor is prepared once they exist; model-swap
+  # re-preparation is handled by terraform_data.supervisor_reversion (CLI prepare + re-version).
+  prepare_agent = false
   tags          = var.tags
 }
 

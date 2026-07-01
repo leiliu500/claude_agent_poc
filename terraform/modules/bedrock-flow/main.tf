@@ -62,11 +62,18 @@ resource "aws_bedrockagent_flow" "this" {
           lambda_arn = var.process_lambda_arn
         }
       }
-      # Two inputs: the original question and the supervisor agent's response text.
+      # Three inputs: the original question, the authenticated caller (identity + resolved IDs,
+      # from the input document), and the supervisor agent's response text.
       input {
         name       = "question"
         type       = "String"
         expression = "$.data.question"
+      }
+      # Authenticated caller as a JSON string (identity + resolved IDs); flow-process JSON-parses it.
+      input {
+        name       = "auth"
+        type       = "String"
+        expression = "$.data.auth"
       }
       input {
         name       = "agentResponse"
@@ -117,6 +124,20 @@ resource "aws_bedrockagent_flow" "this" {
       }
     }
 
+    # Same input document also feeds the Process node's `auth` input (identity + resolved IDs).
+    connection {
+      name   = "InputToProcessAuth"
+      source = "FlowInput"
+      target = "Process"
+      type   = "Data"
+      configuration {
+        data {
+          source_output = "document"
+          target_input  = "auth"
+        }
+      }
+    }
+
     connection {
       name   = "SupervisorToProcess"
       source = "Supervisor"
@@ -150,7 +171,7 @@ data "aws_region" "current" {}
 locals {
   # Changes whenever the flow wiring/topology changes, so a fresh immutable flow version is cut
   # and the "live" alias advances to it. Bump `flow_topology_rev` on any node/connection edit.
-  flow_topology_rev    = "v2-process-node"
+  flow_topology_rev    = "v3-process-auth-input"
   flow_definition_hash = sha1(join("|", [var.supervisor_alias_arn, var.process_lambda_arn, local.flow_topology_rev]))
 }
 
