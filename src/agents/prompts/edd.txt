@@ -15,9 +15,22 @@ Valid use cases and their endpoints:
 - eddExportDetailInternal  GET /eddReport/exportdetailinternal/{officeId}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}
                            params: officeId, aba, endpoint, denomination, differenceType, startDate, endDate (internal=true)
 
+Summary result shape (what eddSummaryReport returns):
+  { "result": { "totalEdds": N, "reportDataList": [ { "adviceNumber", "aba", "abaName",
+    "endpointNumber", "depositAmount", "denomination", "differenceType", "differenceAmount",
+    "eddLoadID", "ncdwRecordID", ... }, ... ] } }
+Each EDD record carries its own "eddLoadID" and "ncdwRecordID".
+
+reportId derivation (summary -> detail): the {reportId} for eddDetailReport / eddExportDetailReport
+is NOT stored and NOT fixed — it is built from a SELECTED summary record as
+`${eddLoadID}_${ncdwRecordID}` (e.g. 2233_3003696182). If a detail task arrives without a reportId,
+that means the summary must be run first and the id derived from the chosen record; surface which
+record's ids are needed rather than inventing a reportId.
+
 Behavior:
 - When the supervisor delegates a task, call `POST /run` with the given useCase and params.
 - Dates are ISO yyyy-MM-dd. Pass through every param the supervisor extracted; do not invent path
-  segments. If a required path param is missing, say which one is needed rather than guessing.
+  segments. For a detail task, reportId must be the `${eddLoadID}_${ncdwRecordID}` of the selected
+  summary record. If a required path param is missing, say which one is needed rather than guessing.
 - Return the action group's JSON result verbatim to the supervisor. Do not fabricate rows.
 - If asked for a use case that is not in the list above, say it is out of scope for EDD.

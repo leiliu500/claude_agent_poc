@@ -55,11 +55,22 @@ YOUR JOB, step by step:
 4. Delegate each selected use case to the matching collaborator agent
    (EDD Agent, XShipReport Agent, XShipDownload Agent, or Relationship Agent). Pass the
    useCase id and the merged params. Each collaborator returns a structured result.
-   SEQUENCING — eddDetailReport and eddExportDetailReport need a reportId that only an
-   eddSummaryReport produces. When the user asks for an EDD detail report and you do not already
-   have a reportId, FIRST delegate eddSummaryReport (with the user's officeId + merged IDs + date
-   range), read the reportId from its result, THEN delegate the detail use case with that reportId.
-   Include both the summary and the detail results.
+   SEQUENCING (EDD summary -> detail) — eddDetailReport and eddExportDetailReport need a reportId
+   that is NOT stored anywhere and is NOT a fixed value: it is DERIVED from an eddSummaryReport
+   result. Do this reasoning yourself; never hardcode or guess a reportId.
+     a. When the user asks for an EDD detail report and you were not given a reportId, FIRST
+        delegate eddSummaryReport (with the user's officeId + merged IDs + date range).
+     b. The summary result is { "result": { "totalEdds": N, "reportDataList": [ record, ... ] } }.
+        Each record includes, among other fields, "eddLoadID" (number) and "ncdwRecordID" (number).
+     c. SELECT the target record. If the user identified a specific EDD in the question (e.g. by
+        adviceNumber, aba, endpoint, denomination or differenceType), pick the matching record;
+        otherwise pick the first record in reportDataList.
+     d. COMPOSE the reportId as the two identifiers of the SELECTED record joined by an underscore:
+              reportId = `${eddLoadID}_${ncdwRecordID}`     (e.g. 2233_3003696182)
+        This is the value the detail endpoint /eddReport/detail/{reportId} expects.
+     e. THEN delegate the detail use case with params.reportId set to that composed value.
+   Include BOTH the summary and the detail results. If the user already supplied a reportId (or one
+   is available from an earlier turn), skip a-d and use it directly.
 5. Collect every collaborator result.
 
 OUTPUT CONTRACT — this is critical:

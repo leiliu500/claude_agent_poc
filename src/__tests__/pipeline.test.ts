@@ -14,7 +14,7 @@ import { readFlowInputs } from "../shared/flow-io.js";
 import { handler as dispatchHandler } from "../lambdas/dispatch/handler.js";
 import { handler as processHandler } from "../lambdas/flow-process/handler.js";
 import { handler as dbHandler } from "../lambdas/action-groups/db/handler.js";
-import { orchestrate } from "../shared/orchestrator.js";
+import { orchestrate, extractReportId } from "../shared/orchestrator.js";
 import { clearMemoryForTests } from "../shared/report-memory.js";
 import { extractUserName, lookupUserIdentifiers } from "../shared/user-directory.js";
 import { generateMock } from "../mock/data.js";
@@ -417,6 +417,30 @@ describe("cross-session report memory", () => {
     expect(useCases).toContain("eddSummaryReport");
     expect(useCases).toContain("eddDetailReport");
     expect(useCases.indexOf("eddSummaryReport")).toBeLessThan(useCases.indexOf("eddDetailReport"));
+  });
+});
+
+describe("EDD summary -> detail reportId derivation (the rule the agent applies)", () => {
+  it("takes the selected summary record's eddLoadID + ncdwRecordID as the detail report_id", () => {
+    const summary = {
+      type: "EDD", useCase: "eddSummaryReport", status: "ok",
+      data: [
+        { adviceNumber: 41, eddLoadID: 2233, ncdwRecordID: 3003696182 },
+        { adviceNumber: 42, eddLoadID: 2234, ncdwRecordID: 3003696183 },
+      ],
+      meta: {}, latencyMs: 1,
+    } as unknown as import("../shared/types.js").DispatchResult;
+    // No stored/fixed id — it is composed from the selected (here first) record.
+    expect(extractReportId(summary)).toBe("2233_3003696182");
+  });
+
+  it("prefers a backend-surfaced meta.reportId when the summary already carries one", () => {
+    const summary = {
+      type: "EDD", useCase: "eddSummaryReport", status: "ok",
+      data: [{ eddLoadID: 1, ncdwRecordID: 2 }],
+      meta: { reportId: "489_3998240" }, latencyMs: 1,
+    } as unknown as import("../shared/types.js").DispatchResult;
+    expect(extractReportId(summary)).toBe("489_3998240");
   });
 });
 

@@ -76,12 +76,20 @@ function eddSummarySig(p: TaskParams): string {
     .join("|");
 }
 
-/** Pull the reportId an eddSummaryReport surfaced (meta.reportId, else a row's caseId). */
-function extractReportId(summary: DispatchResult): string | undefined {
+/**
+ * Derive the detail reportId from an eddSummaryReport result — the same rule the Supervisor agent
+ * applies (see src/agents/prompts). The reportId is NOT stored: it is composed from a selected
+ * summary record as `${eddLoadID}_${ncdwRecordID}`. Prefer the backend-surfaced meta.reportId (the
+ * primary record); otherwise select the first record in the data list and compose it from its ids.
+ * This is the deterministic mirror of the agent's reasoning, not a hardcoded value.
+ */
+export function extractReportId(summary: DispatchResult): string | undefined {
   const fromMeta = summary.meta?.reportId;
   if (typeof fromMeta === "string" && fromMeta) return fromMeta;
-  const fromRow = summary.data?.[0]?.caseId;
-  if (typeof fromRow === "string" && fromRow) return fromRow;
+  const row = summary.data?.[0];
+  if (row && row.eddLoadID != null && row.ncdwRecordID != null) {
+    return `${row.eddLoadID}_${row.ncdwRecordID}`;
+  }
   return undefined;
 }
 
