@@ -103,12 +103,29 @@ module "lambda_workers" {
       description = "Flow node: final report generation."
     }
     "flow-process" = {
-      zip_path    = "${var.dist_dir}/flow-process.zip"
-      role_arn    = module.iam.lambda_basic_role_arn
-      environment = { LOG_LEVEL = var.log_level }
-      timeout     = var.lambda_timeout_seconds
-      memory_size = var.lambda_memory_mb
-      description = "Flow node: combined dispatch+analytics+report."
+      zip_path = "${var.dist_dir}/flow-process.zip"
+      # Reaches RDS for per-user report memory (recall/remember reportIds). Uses the DB role +
+      # VPC placement when the database is enabled; otherwise stays out of the VPC and the memory
+      # store degrades to an in-process map (no cross-session persistence, no behavior change).
+      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = var.lambda_timeout_seconds
+      memory_size            = var.lambda_memory_mb
+      description            = "Flow node: combined dispatch+analytics+report; reads/writes per-user report memory."
+    }
+    # ── One-off DB migration: applies db/schema.sql to RDS from inside the VPC (invoke manually
+    #    after a schema change; the script is idempotent). Only useful when the database is enabled. ──
+    "db-migrate" = {
+      zip_path               = "${var.dist_dir}/db-migrate.zip"
+      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = 60
+      memory_size            = var.lambda_memory_mb
+      description            = "One-off: apply db/schema.sql to RDS from inside the VPC (idempotent)."
     }
     # ── Auth: login endpoint + request authorizer (see auth.tf for the shared secret/locals) ──
     "auth-login" = {

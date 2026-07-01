@@ -15,6 +15,7 @@
  */
 import { createLogger } from "./logger.js";
 import { verifyPassword } from "./auth.js";
+import { sslConfig } from "./pg.js";
 
 const log = createLogger({ mod: "user-directory" });
 
@@ -107,11 +108,12 @@ function lookupInMemory(userName: string): UserLookup {
  * to surface the error or fall back.
  */
 async function lookupPostgres(userName: string, databaseUrl: string): Promise<UserLookup> {
-  // Lazy import keeps `pg` out of the bundle/closure for the default in-memory path. A non-literal
-  // specifier defers module resolution to runtime (pg is provided via a Lambda layer when enabled).
-  const pgModule = "pg";
-  const pg = (await import(pgModule)) as unknown as { Pool: new (cfg: { connectionString: string }) => PgPool };
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  // Lazy import so the `pg` driver only loads when a real DATABASE_URL is configured; esbuild bundles
+  // it into the deployment package (the DB subnets have no NAT to fetch it at runtime).
+  const pg = (await import("pg")) as unknown as {
+    Pool: new (cfg: { connectionString: string; ssl?: boolean | { rejectUnauthorized: boolean } }) => PgPool;
+  };
+  const pool = new pg.Pool({ connectionString: databaseUrl, ssl: sslConfig() });
   try {
     const idRes = await pool.query<{ user_id: string }>("SELECT fedline.get_user_id($1) AS user_id", [userName]);
     const userId = idRes.rows[0]?.user_id;
@@ -183,9 +185,10 @@ function verifyInMemory(username: string, password: string): CredentialCheck {
  * Throws on connection/query failure so the caller can fall back to the in-memory mirror.
  */
 async function verifyPostgres(username: string, password: string, databaseUrl: string): Promise<CredentialCheck> {
-  const pgModule = "pg";
-  const pg = (await import(pgModule)) as unknown as { Pool: new (cfg: { connectionString: string }) => PgPool };
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  const pg = (await import("pg")) as unknown as {
+    Pool: new (cfg: { connectionString: string; ssl?: boolean | { rejectUnauthorized: boolean } }) => PgPool;
+  };
+  const pool = new pg.Pool({ connectionString: databaseUrl, ssl: sslConfig() });
   try {
     const authRes = await pool.query<{ user_id: string; full_name: string; password_hash: string | null }>(
       "SELECT user_id, full_name, password_hash FROM fedline.get_user_auth($1)",

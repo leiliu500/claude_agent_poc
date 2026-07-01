@@ -136,6 +136,83 @@ AS $$
     LIMIT  1;
 $$;
 
+-- ── Report memory (cross-session, per user) ──────────────────────────────────
+-- Remembers what a user's prior report runs produced so a follow-up can reuse them
+-- instead of recomputing. The headline case: an eddSummaryReport produces a `reportId`
+-- that an eddDetailReport needs; without memory the summary is re-run every time the
+-- user later asks for the detail. Here the summary's reportId is persisted per user +
+-- `report_key` (a signature of the summary's identifying params) and recalled on the
+-- next turn — even in a later session.
+--
+-- `report_key` is computed in code (src/shared/orchestrator.ts eddSummarySig) from the
+-- params that identify a specific summary (officeId, userAba, aba, endpoint, denomination,
+-- differenceType, startDate, endDate). One canonical row per (user_id, report_key).
+CREATE TABLE IF NOT EXISTS fedline.report_memory (
+    memory_id   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id     BIGINT NOT NULL
+                    REFERENCES fedline.app_user (user_id) ON DELETE CASCADE,
+    report_key  TEXT   NOT NULL,   -- signature of the summary's identifying params
+    use_case    TEXT   NOT NULL,   -- the use case that produced the report (e.g. eddSummaryReport)
+    report_id   TEXT   NOT NULL,   -- the reusable id downstream calls need
+    params      JSONB  NOT NULL DEFAULT '{}'::jsonb,  -- params the report ran with (for follow-ups)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, report_key)
+);
+
+CREATE INDEX IF NOT EXISTS report_memory_user_idx
+    ON fedline.report_memory (user_id);
+-- Ordered lookup of a user's most recent report of a given use case (recall_latest_report).
+CREATE INDEX IF NOT EXISTS report_memory_user_usecase_recent_idx
+    ON fedline.report_memory (user_id, use_case, updated_at DESC);
+
+-- Upsert one memory row. Called after a report that yields a reusable id runs.
+CREATE OR REPLACE FUNCTION fedline.remember_report(
+    p_user_id   BIGINT,
+    p_key       TEXT,
+    p_use_case  TEXT,
+    p_report_id TEXT,
+    p_params    JSONB
+) RETURNS VOID
+LANGUAGE sql
+AS $$
+    INSERT INTO fedline.report_memory (user_id, report_key, use_case, report_id, params)
+    VALUES (p_user_id, p_key, p_use_case, p_report_id, COALESCE(p_params, '{}'::jsonb))
+    ON CONFLICT (user_id, report_key) DO UPDATE
+        SET use_case   = EXCLUDED.use_case,
+            report_id  = EXCLUDED.report_id,
+            params     = EXCLUDED.params,
+            updated_at = now();
+$$;
+
+-- Recall a specific remembered report by its exact signature (the safe primary path).
+CREATE OR REPLACE FUNCTION fedline.recall_report(p_user_id BIGINT, p_key TEXT)
+RETURNS TABLE (report_id TEXT, params JSONB, use_case TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT rm.report_id, rm.params, rm.use_case
+    FROM   fedline.report_memory rm
+    WHERE  rm.user_id = p_user_id
+    AND    rm.report_key = p_key
+    LIMIT  1;
+$$;
+
+-- Recall a user's most recently updated report for a use case (drives the "now the
+-- detail" follow-up when the detail request repeats no distinguishing params).
+CREATE OR REPLACE FUNCTION fedline.recall_latest_report(p_user_id BIGINT, p_use_case TEXT)
+RETURNS TABLE (report_id TEXT, params JSONB, report_key TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT rm.report_id, rm.params, rm.report_key
+    FROM   fedline.report_memory rm
+    WHERE  rm.user_id = p_user_id
+    AND    rm.use_case = p_use_case
+    ORDER  BY rm.updated_at DESC
+    LIMIT  1;
+$$;
+
 -- ============================================================================
 -- Seed data
 -- ============================================================================

@@ -20,6 +20,7 @@ import type { AgentType, AuthContext, DispatchResult, TaskParams, TaskRequest } 
 import { route } from "./router.js";
 import { executeTask } from "./dispatch.js";
 import { extractUserName, lookupUserIdentifiers } from "./user-directory.js";
+import { recallLatestReport, recallReport, rememberReport } from "./report-memory.js";
 import { ValidationError } from "./errors.js";
 import { createLogger } from "./logger.js";
 
@@ -34,8 +35,29 @@ export interface OrchestrationResult {
 /** Use cases whose endpoint needs a reportId that an eddSummaryReport must produce first. */
 const REPORT_ID_DEPENDENTS = new Set(["eddDetailReport", "eddExportDetailReport"]);
 
+/** The summary use case whose reportId the dependent detail use cases reuse. */
+const SUMMARY_USE_CASE = "eddSummaryReport";
+
 function present(v: unknown): boolean {
   return v !== undefined && v !== null && v !== "";
+}
+
+/**
+ * True when the detail request pins a specific report period (the only request-supplied part of the
+ * summary signature — the rest are the user's stored identifiers). When absent, the request reads as
+ * "the detail of the report I just ran", so we may reuse the user's most recent remembered summary.
+ */
+function pinsReportPeriod(p: TaskParams): boolean {
+  return present(p.startDate) || present(p.endDate);
+}
+
+/** Fill only the params the request left absent from a remembered report (request values still win). */
+function fillMissingParams(requestParams: TaskParams, remembered: TaskParams): TaskParams {
+  const merged: TaskParams = { ...requestParams };
+  for (const [k, v] of Object.entries(remembered)) {
+    if (!present(merged[k]) && present(v)) merged[k] = v as never;
+  }
+  return merged;
 }
 
 /** Merge DB identifiers under request-extracted params: request-provided values take precedence. */
@@ -63,39 +85,110 @@ function extractReportId(summary: DispatchResult): string | undefined {
   return undefined;
 }
 
+/** Options for {@link executeWithDependencies}. */
+export interface ExecuteOptions {
+  /** The requesting user's id — enables cross-session report memory when present. */
+  userId?: string;
+}
+
 /**
- * Execute tasks in order, resolving the eddSummary → reportId → eddDetail dependency. A summary is
- * run at most once per distinct report signature and surfaced as its own section, whether it was
- * requested explicitly or pulled in only to satisfy a detail task.
+ * Execute tasks in order, resolving the eddSummary → reportId → eddDetail dependency.
+ *
+ * The reportId a detail call needs is resolved in priority order:
+ *   1. an eddSummaryReport already run *this turn* (in-turn cache);
+ *   2. a prior summary this user ran, recalled from cross-session memory — by exact signature, or
+ *      (when the detail pins no period) their most recent summary. On a memory hit the summary is
+ *      NOT re-run — the detail runs directly, which is the whole point of having memory;
+ *   3. otherwise the summary is run now (today's behaviour) and its reportId is remembered so the
+ *      next turn — even in a later session — can skip it.
+ *
+ * Every summary that runs (explicit or dependency-driven) is remembered for the user.
  */
-async function executeWithDependencies(tasks: TaskRequest[]): Promise<DispatchResult[]> {
+async function executeWithDependencies(tasks: TaskRequest[], opts: ExecuteOptions = {}): Promise<DispatchResult[]> {
+  const { userId } = opts;
   const out: DispatchResult[] = [];
   const summaryBySig = new Map<string, DispatchResult>();
 
+  /** Run a summary, cache it in-turn, surface it as a section, and remember it for the user. */
+  const runSummary = async (params: TaskParams): Promise<DispatchResult> => {
+    const sig = eddSummarySig(params);
+    const result = await executeTask({ type: "EDD", useCase: SUMMARY_USE_CASE, params });
+    out.push(result);
+    summaryBySig.set(sig, result);
+    const reportId = extractReportId(result);
+    if (userId && reportId) {
+      await rememberReport({ userId, key: sig, useCase: SUMMARY_USE_CASE, reportId, params });
+    }
+    return result;
+  };
+
   for (let task of tasks) {
-    if (task.useCase === "eddSummaryReport") {
-      const result = await executeTask(task);
-      out.push(result);
-      summaryBySig.set(eddSummarySig(task.params), result);
+    if (task.useCase === SUMMARY_USE_CASE) {
+      await runSummary(task.params);
       continue;
     }
 
     if (REPORT_ID_DEPENDENTS.has(task.useCase) && !present(task.params.reportId)) {
       const sig = eddSummarySig(task.params);
-      let summary = summaryBySig.get(sig);
-      if (!summary) {
-        log.info("running eddSummaryReport first to obtain reportId for detail", { useCase: task.useCase });
-        summary = await executeTask({ type: "EDD", useCase: "eddSummaryReport", params: task.params });
-        out.push(summary);
-        summaryBySig.set(sig, summary);
+      let reportId: string | undefined;
+
+      // 1. Summary already produced this turn.
+      const inTurn = summaryBySig.get(sig);
+      if (inTurn) reportId = extractReportId(inTurn);
+
+      // 2. Cross-session memory — reuse a prior summary WITHOUT re-running it.
+      if (!reportId && userId) {
+        const exact = await recallReport(userId, sig);
+        if (exact) {
+          reportId = exact.reportId;
+          log.info("recalled reportId from memory (exact); skipping summary", { useCase: task.useCase });
+        } else if (!pinsReportPeriod(task.params)) {
+          const latest = await recallLatestReport(userId, SUMMARY_USE_CASE);
+          if (latest) {
+            reportId = latest.reportId;
+            // Follow-up on the last summary: adopt its period so the detail matches that report.
+            task = { ...task, params: fillMissingParams(task.params, latest.params) };
+            log.info("recalled reportId from memory (latest summary); skipping summary", { useCase: task.useCase });
+          }
+        }
       }
-      const reportId = extractReportId(summary);
+
+      // 3. No memory — run the summary now to obtain the reportId (and remember it).
+      if (!reportId) {
+        log.info("running eddSummaryReport first to obtain reportId for detail", { useCase: task.useCase });
+        reportId = extractReportId(await runSummary(task.params));
+      }
+
       if (reportId) task = { ...task, params: { ...task.params, reportId } };
     }
 
     out.push(await executeTask(task));
   }
   return out;
+}
+
+/**
+ * Memory-aware task execution for callers that already have a task list (e.g. the flow-process node
+ * running the supervisor agent's chosen tasks). Resolves the eddSummary → detail dependency and
+ * reuses/records reportIds in per-user memory.
+ */
+export function runTasks(tasks: TaskRequest[], opts: ExecuteOptions = {}): Promise<DispatchResult[]> {
+  return executeWithDependencies(tasks, opts);
+}
+
+/**
+ * Record a summary reportId the agent produced on its own (the flow-process agent-results branch),
+ * so a later turn can reuse it. Best-effort; safe to call with non-summary results.
+ */
+export async function rememberSummaryResults(results: DispatchResult[], userId?: string): Promise<void> {
+  if (!userId) return;
+  for (const r of results) {
+    if (r.useCase !== SUMMARY_USE_CASE || r.status !== "ok") continue;
+    const reportId = extractReportId(r);
+    if (!reportId) continue;
+    const params = (r.meta?.params as TaskParams) ?? {};
+    await rememberReport({ userId, key: eddSummarySig(params), useCase: SUMMARY_USE_CASE, reportId, params });
+  }
 }
 
 /**
@@ -111,9 +204,9 @@ async function executeWithDependencies(tasks: TaskRequest[]): Promise<DispatchRe
 async function resolveIdentity(
   question: string,
   auth?: AuthContext,
-): Promise<{ userName: string; identifiers: Record<string, string> }> {
+): Promise<{ userId?: string; userName: string; identifiers: Record<string, string> }> {
   if (auth) {
-    return { userName: auth.userName, identifiers: auth.identifiers ?? {} };
+    return { userId: auth.userId, userName: auth.userName, identifiers: auth.identifiers ?? {} };
   }
 
   const userName = extractUserName(question);
@@ -128,6 +221,7 @@ async function resolveIdentity(
       `Unknown user '${userName}'. No identifiers are on file for that name, so the report cannot be run.`,
     );
   }
+  // No stable userId on the legacy name-in-question path — report memory stays disabled there.
   return { userName: lookup.fullName ?? userName, identifiers: lookup.identifiers };
 }
 
@@ -137,7 +231,7 @@ async function resolveIdentity(
  * otherwise identity is parsed from the question text (legacy/test path).
  */
 export async function orchestrate(question: string, auth?: AuthContext): Promise<OrchestrationResult> {
-  const { userName, identifiers } = await resolveIdentity(question, auth);
+  const { userId, userName, identifiers } = await resolveIdentity(question, auth);
 
   const decision = route(question);
   const tasks: TaskRequest[] = decision.tasks.map((t) => ({
@@ -152,6 +246,6 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
     tasks: tasks.map((t) => t.useCase),
   });
 
-  const results = await executeWithDependencies(tasks);
+  const results = await executeWithDependencies(tasks, { userId });
   return { type: decision.type, userName, results };
 }

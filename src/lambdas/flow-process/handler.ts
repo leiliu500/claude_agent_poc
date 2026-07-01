@@ -22,8 +22,7 @@
 import type { AgentType, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
 import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
-import { orchestrate } from "../../shared/orchestrator.js";
-import { executeTasks } from "../../shared/dispatch.js";
+import { orchestrate, rememberSummaryResults, runTasks } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
 import { createLogger } from "../../shared/logger.js";
@@ -76,10 +75,14 @@ async function resolveResults(
   const parsed = parseSupervisorOutput(agentResponse);
 
   if (parsed.dispatchResults.length > 0) {
+    // The agent already ran the tasks — record any summary reportId so a later turn can reuse it.
+    await rememberSummaryResults(parsed.dispatchResults, auth?.userId);
     return { type: parsed.type, results: parsed.dispatchResults, source: "agent-results" };
   }
   if (parsed.tasks.length > 0) {
-    return { type: parsed.type, results: await executeTasks(parsed.tasks), source: "agent-tasks" };
+    // Run the agent's chosen tasks through the memory-aware executor so the eddSummary → detail
+    // dependency reuses (or records) reportIds in this user's cross-session memory.
+    return { type: parsed.type, results: await runTasks(parsed.tasks, { userId: auth?.userId }), source: "agent-tasks" };
   }
   // Supervisor output unusable — deterministic orchestration over the original question, using the
   // authenticated identity + IDs carried in the flow's `auth` input (resolves IDs and sequences
