@@ -17,10 +17,22 @@ import { createLogger } from "../../shared/logger.js";
 const log = createLogger({ mod: "db-migrate" });
 
 export const handler = async (
-  event?: { query?: string },
-): Promise<{ ok: boolean; error?: string; rows?: unknown[] }> => {
+  event?: { query?: string; reset?: string },
+): Promise<{ ok: boolean; error?: string; rows?: unknown[]; cleared?: number }> => {
   if (!process.env.DATABASE_URL) {
     return { ok: false, error: "DATABASE_URL is not set — nothing to migrate." };
+  }
+  // Admin maintenance: clear the report-memory cache (e.g. after the reportId format changed, old
+  // rows hold stale ids). Scoped to that one table — not arbitrary DML.
+  if (event?.reset === "report_memory") {
+    try {
+      const rows = await query<{ n: string }>(
+        "WITH d AS (DELETE FROM fedline.report_memory RETURNING 1) SELECT count(*)::text AS n FROM d",
+      );
+      return { ok: true, cleared: Number(rows[0]?.n ?? 0) };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   }
   // Admin read-back path: run a caller-supplied SELECT to inspect the private DB (VPC-only, IAM-gated).
   // Guarded to read-only (SELECT/WITH) so this one-off can't be used to mutate data.

@@ -45,6 +45,9 @@ export interface TaskParams {
   pageSize?: number;
   sortField?: string;
   sortOrder?: string;
+  /** EDD detail record identifiers. When both are supplied, reportId = `${eddLoadID}_${ncdwRecordID}`. */
+  eddLoadID?: string;
+  ncdwRecordID?: string;
 
   // XShipReport path params.
   rollupAbaName?: string;
