@@ -42,7 +42,7 @@
                       "differenceType": { "type": "string", "description": "Difference-type filter (path segment)." },
                       "startDate": { "type": "string", "description": "Range start date, ISO yyyy-MM-dd." },
                       "endDate": { "type": "string", "description": "Range end date, ISO yyyy-MM-dd." },
-                      "reportId": { "type": "string", "description": "Identifier of a prepared report (detail / export-detail)." },
+                      "reportId": { "type": "string", "description": "Detail report id (detail / export-detail). NOT stored and NOT fixed: derive it from an eddSummaryReport result by selecting a record from result.reportDataList and joining its identifiers as `${eddLoadID}_${ncdwRecordID}` (e.g. 2233_3003696182)." },
                       "pageNumber": { "type": "number", "description": "1-based page number (summary query)." },
                       "pageSize": { "type": "number", "description": "Rows per page (summary query)." },
                       "sortField": { "type": "string", "description": "Field to sort by (summary query)." },
