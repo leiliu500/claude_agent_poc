@@ -59,6 +59,7 @@
   const messagesEl = $("messages");
   const chatEl = $("chat");
   const welcomeEl = $("welcome");
+  const welcomeHeadingEl = $("welcomeHeading");
   const inputEl = $("input");
   const formEl = $("composerForm");
   const sendBtn = $("sendBtn");
@@ -530,7 +531,10 @@
     loginView.hidden = true;
     appEl.hidden = false;
     userBox.hidden = false;
-    userNameEl.textContent = (session && session.user && session.user.fullName) || "Signed in";
+    const name = (session && session.user && session.user.fullName) || "Signed in";
+    userNameEl.textContent = name;
+    // Logged-in users always get a personalized greeting on the welcome screen.
+    welcomeHeadingEl.textContent = `Hello, ${name}, what can I help?`;
     autosize();
     inputEl.focus();
   }
