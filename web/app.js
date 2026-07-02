@@ -46,6 +46,7 @@
   // from their session token, so requests stay short and identity can't be spoofed in the text.
   const EXAMPLES = [
     "Run the EDD summary report for endpoint wire, denomination USD, differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
+    "Export the EDD summary report for endpoint wire, denomination USD, differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
     "Give me the EDD detail report and export it for 2026-Q2.",
     "XShip fee summary and fee detail for 2026-Q2.",
     "Download shipping activity for zone B1.",

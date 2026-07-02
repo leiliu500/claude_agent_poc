@@ -177,9 +177,13 @@ export function route(question: string): RoutingDecision {
 }
 
 /**
- * Decide the concrete task list. If the user asked to export *and* the top match has a
- * non-export sibling (and vice-versa), include both — that is the canonical orchestration
- * case ("give me the summary and export it").
+ * Decide the concrete task list.
+ *
+ * When the user asked to export, the EXPORT artifact is the primary deliverable — even if a
+ * non-export use case scored higher on a literal label match (e.g. "Export the EDD summary report"
+ * contains the label "EDD Summary Report", which would otherwise make the paged summary win). We
+ * additionally include the plain (view) sibling ONLY when the phrasing wants BOTH — the canonical
+ * orchestration case "give me the summary AND export it" — not for a bare "export the … report".
  */
 function selectOrchestratedTasks(
   q: string,
@@ -187,20 +191,31 @@ function selectOrchestratedTasks(
   params: TaskParams,
 ): TaskRequest[] {
   const wantsExport = params.export === true;
-  const tasks: TaskRequest[] = [];
-
   const best = candidates[0]!;
-  tasks.push({ type: best.type, useCase: best.id, params });
 
-  if (wantsExport && !best.exportable) {
-    // Find an exportable sibling that shares keywords with the best match.
-    const sibling = candidates.find(
-      (c) => c.exportable && shareKeyword(c, best),
-    );
-    if (sibling) tasks.push({ type: sibling.type, useCase: sibling.id, params });
+  if (wantsExport) {
+    // "export the X" → export only; "give me X and export it" / "export it" → base view + export.
+    const wantsBoth =
+      /\b(and|also|then|plus)\b[^.]*\b(export|download|csv|excel|pdf|extract|file)\b/.test(q) ||
+      /\b(export|download)\s+(it|this|that|them)\b/.test(q);
+
+    const exportUC = best.exportable ? best : candidates.find((c) => c.exportable && shareKeyword(c, best));
+    const baseUC = best.exportable ? candidates.find((c) => !c.exportable && shareKeyword(c, best)) : best;
+
+    if (exportUC) {
+      const tasks: TaskRequest[] = [];
+      // List the base report first, then its export, when both are wanted.
+      if (wantsBoth && baseUC && baseUC.id !== exportUC.id) {
+        tasks.push({ type: baseUC.type, useCase: baseUC.id, params });
+      }
+      tasks.push({ type: exportUC.type, useCase: exportUC.id, params });
+      return tasks;
+    }
+    // No exportable relative found — fall through to the plain best match.
   }
 
-  // If the question explicitly enumerates another use case strongly, include it too.
+  const tasks: TaskRequest[] = [{ type: best.type, useCase: best.id, params }];
+  // No export requested: include any other use case the question explicitly enumerates.
   for (const c of candidates.slice(1, 3)) {
     if (q.includes(c.id.toLowerCase()) || q.includes(c.label.toLowerCase())) {
       tasks.push({ type: c.type, useCase: c.id, params });
