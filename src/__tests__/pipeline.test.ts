@@ -450,6 +450,56 @@ describe("EDD detail from request-supplied record ids (no summary needed)", () =
     const detail = d.tasks.find((t) => t.useCase === "eddDetailReport")!;
     expect(detail.params.reportId).toBe("6321_3003698918");
   });
+
+  it("routes a LIST of record-id pairs to eddExportDetailReport with the comma-joined reportId", () => {
+    const d = route("EDD detail for 489_3998240,33_8431808");
+    expect(d.type).toBe("EDD");
+    expect(d.tasks).toHaveLength(1);
+    const detail = d.tasks[0]!;
+    expect(detail.useCase).toBe("eddExportDetailReport");
+    expect(detail.params.reportId).toBe("489_3998240,33_8431808");
+  });
+
+  it("pairs TWO eddLoadID/ncdwRecordID written out separately into a comma-joined export list", () => {
+    const d = route(
+      "generate export detail report for eddLoadID=8030, ncdwRecordID=3003632029 and eddLoadID=8031, ncdwRecordID=3003611822",
+    );
+    expect(d.type).toBe("EDD");
+    expect(d.tasks).toHaveLength(1);
+    const detail = d.tasks[0]!;
+    expect(detail.useCase).toBe("eddExportDetailReport");
+    // Both pairs kept, positionally joined — not just the first.
+    expect(detail.params.reportId).toBe("8030_3003632029,8031_3003611822");
+  });
+
+  it("expands both separately-written pairs end-to-end (no summary, two records)", async () => {
+    const lookup = await lookupUserIdentifiers("Lei Liu");
+    const auth: AuthContext = { userId: "1", userName: "Lei Liu", identifiers: lookup.identifiers };
+    const { results } = await orchestrate(
+      "generate export detail report for eddLoadID=8030, ncdwRecordID=3003632029 and eddLoadID=8031, ncdwRecordID=3003611822",
+      auth,
+    );
+    expect(results.map((r) => r.useCase)).not.toContain("eddSummaryReport");
+    const detail = results.find((r) => r.useCase === "eddExportDetailReport")!;
+    expect(String(detail.meta.endpoint)).toContain("8030_3003632029");
+    expect(String(detail.meta.endpoint)).toContain("8031_3003611822");
+    const env = detail.meta.result as { reportDataList: Array<{ edd: unknown }> };
+    expect(env.reportDataList).toHaveLength(2);
+  });
+
+  it("runs eddExportDetailReport over the id list WITHOUT a summary and expands every pair", async () => {
+    const lookup = await lookupUserIdentifiers("Lei Liu");
+    const auth: AuthContext = { userId: "1", userName: "Lei Liu", identifiers: lookup.identifiers };
+    const { results } = await orchestrate("EDD detail for 489_3998240,33_8431808", auth);
+    const useCases = results.map((r) => r.useCase);
+    expect(useCases).toContain("eddExportDetailReport");
+    expect(useCases).not.toContain("eddSummaryReport"); // records were given directly
+    const detail = results.find((r) => r.useCase === "eddExportDetailReport")!;
+    // One reportDataList entry per requested pair.
+    const env = detail.meta.result as { reportDataList: Array<{ edd: unknown }> };
+    expect(env.reportDataList).toHaveLength(2);
+    expect(detail.data).toHaveLength(2);
+  });
 });
 
 describe("EDD summary -> detail reportId derivation (the rule the agent applies)", () => {
@@ -518,6 +568,25 @@ describe("EDD mock shapes (realistic API simulation)", () => {
     // The table row is a flat projection (no nested objects, so it renders cleanly).
     expect(detail.rows).toHaveLength(1);
     for (const v of Object.values(detail.rows[0]!)) expect(typeof v).not.toBe("object");
+  });
+
+  it("export detail expands a LIST of pairs into one reportDataList entry per pair", () => {
+    const reportId = "489_3998240,33_8431808";
+    const detail = generateMock("eddExportDetailReport", { ...eddParams, reportId });
+    expect(detail.meta.reportId).toBe(reportId);
+    expect(detail.meta.reportIds).toEqual(["489_3998240", "33_8431808"]);
+    const env = detail.meta.result as { reportDataList: Array<{ edd: Record<string, unknown> }> };
+    expect(env.reportDataList).toHaveLength(2);
+    for (const { edd } of env.reportDataList) {
+      for (const section of ["differenceDetail", "depositDetail", "adminAddress", "forAccountAddress",
+        "cashDeptAddress", "additionalInfo"]) {
+        expect(edd).toHaveProperty(section);
+      }
+    }
+    // Distinct records: the two pairs seed different detail content.
+    expect(env.reportDataList[0]!.edd).not.toEqual(env.reportDataList[1]!.edd);
+    // One flat table row per record too.
+    expect(detail.rows).toHaveLength(2);
   });
 
   it("is deterministic for the same params (stable tests / reproducible demos)", () => {

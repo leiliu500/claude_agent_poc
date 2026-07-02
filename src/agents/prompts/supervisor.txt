@@ -58,11 +58,15 @@ YOUR JOB, step by step:
    SEQUENCING (EDD summary -> detail) — eddDetailReport and eddExportDetailReport need a reportId
    that is NOT stored anywhere and is NOT a fixed value: it is DERIVED from an EDD record's
    identifiers. Do this reasoning yourself; never hardcode or guess a reportId.
-     SHORTCUT — if the user already gives the target record directly, DO NOT run a summary:
+     SHORTCUT — if the user already gives the target record(s) directly, DO NOT run a summary:
        * if they state a report_id, use it verbatim; OR
-       * if they state the record's eddLoadID AND ncdwRecordID (e.g. "eddLoadID=6321 and
+       * if they state ONE record's eddLoadID AND ncdwRecordID (e.g. "eddLoadID=6321 and
          ncdwRecordID=3003698918"), compose reportId = `${eddLoadID}_${ncdwRecordID}`
-         (here 6321_3003698918) and delegate the detail with that reportId only.
+         (here 6321_3003698918) and delegate eddDetailReport with that reportId only; OR
+       * if they state a LIST of pairs (e.g. "489_3998240,33_8431808"), compose reportId as the
+         pairs joined by commas and delegate eddExportDetailReport with that single reportId — the
+         detail endpoint (/eddReport/detail/{reportId}) takes the whole comma-joined list and
+         returns one record per pair. Do NOT issue a separate detail call per pair.
      Otherwise, derive it from a summary as follows:
      a. When the user asks for an EDD detail report and you were not given a reportId or record ids,
         FIRST delegate eddSummaryReport (with the user's officeId + merged IDs + date range).

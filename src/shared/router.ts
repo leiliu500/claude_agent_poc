@@ -37,9 +37,15 @@ const END_DATE_RE = /\bend\s*date\s*[:#]?\s*(20\d{2}-\d{2}-\d{2})/i;
 // EDD detail record identifiers the user can name directly to target one record. When both are
 // given the detail runs against reportId = `${eddLoadID}_${ncdwRecordID}` with no summary needed.
 // A directly-supplied report_id wins outright.
-const EDD_LOAD_ID_RE = /\bedd[_ ]?load[_ ]?id\s*[:=#]?\s*(\d+)/i;
-const NCDW_RECORD_ID_RE = /\bncdw[_ ]?record[_ ]?id\s*[:=#]?\s*(\d+)/i;
+// Global so we can capture EVERY pair the user lists (e.g. two eddLoadID/ncdwRecordID written out
+// separately), not just the first — the multi-record export-detail case.
+const EDD_LOAD_ID_RE = /\bedd[_ ]?load[_ ]?id\s*[:=#]?\s*(\d+)/gi;
+const NCDW_RECORD_ID_RE = /\bncdw[_ ]?record[_ ]?id\s*[:=#]?\s*(\d+)/gi;
 const REPORT_ID_RE = /\breport[_ ]?id\s*[:=#]\s*([A-Za-z0-9][\w-]*)/i;
+// A LIST of record ids: two or more comma-separated `${eddLoadID}_${ncdwRecordID}` pairs
+// (e.g. `489_3998240,33_8431808`). This is the multi-record detail case → eddExportDetailReport,
+// whose /eddReport/detail/{reportId} endpoint takes the whole comma-joined list as its {reportId}.
+const REPORT_ID_LIST_RE = /\b\d+_\d+(?:\s*,\s*\d+_\d+)+/;
 
 /** Pull structured params out of the raw question. */
 export function extractParams(question: string): TaskParams {
@@ -87,10 +93,21 @@ export function extractParams(question: string): TaskParams {
   // otherwise eddLoadID + ncdwRecordID let the orchestrator compose the reportId without a summary.
   const reportIdExplicit = question.match(REPORT_ID_RE);
   if (reportIdExplicit) params.reportId = reportIdExplicit[1];
-  const loadId = question.match(EDD_LOAD_ID_RE);
-  if (loadId) params.eddLoadID = loadId[1];
-  const ncdw = question.match(NCDW_RECORD_ID_RE);
-  if (ncdw) params.ncdwRecordID = ncdw[1];
+  // Capture EVERY eddLoadID / ncdwRecordID the user names (in order), then pair them positionally.
+  const loadIds = [...question.matchAll(EDD_LOAD_ID_RE)].map((m) => m[1]!);
+  const ncdwIds = [...question.matchAll(NCDW_RECORD_ID_RE)].map((m) => m[1]!);
+  if (loadIds.length) params.eddLoadID = loadIds[0];
+  if (ncdwIds.length) params.ncdwRecordID = ncdwIds[0];
+  // Two or more well-formed pairs written out separately (e.g. "eddLoadID=8030, ncdwRecordID=... and
+  // eddLoadID=8031, ncdwRecordID=...") → compose a comma-joined reportId list for export detail, so
+  // NO pair is dropped. A single pair stays on eddLoadID/ncdwRecordID (composed by the orchestrator).
+  if (loadIds.length >= 2 && loadIds.length === ncdwIds.length) {
+    params.reportId = loadIds.map((l, i) => `${l}_${ncdwIds[i]}`).join(",");
+  }
+  // A comma-separated list of record-id pairs (pre-joined `X_Y,X_Y`) wins over a single report_id:
+  // it names several records to expand at once (the export-detail case).
+  const idList = question.match(REPORT_ID_LIST_RE);
+  if (idList) params.reportId = idList[0].replace(/\s+/g, "");
 
   if (/\b(export|download|csv|extract|file)\b/.test(q)) params.export = true;
   if (/\b(internal|confidential)\b/.test(q)) params.internal = true;
@@ -106,6 +123,20 @@ export function extractParams(question: string): TaskParams {
 export function route(question: string): RoutingDecision {
   const q = question.toLowerCase();
   const params = extractParams(question);
+
+  // A comma-joined list of record ids means "expand ALL of these" → eddExportDetailReport, whose
+  // /eddReport/detail/{reportId} endpoint accepts the whole list. A single pair (or single
+  // report_id) stays on the eddDetailReport path handled by keyword routing below.
+  if (typeof params.reportId === "string" && params.reportId.includes(",")) {
+    const uc = USE_CASES.find((u) => u.id === "eddExportDetailReport")!;
+    return {
+      type: uc.type,
+      tasks: [{ type: uc.type, useCase: uc.id, params }],
+      requiresOrchestration: false,
+      confidence: 0.9,
+      rationale: `Multiple EDD record ids supplied (${params.reportId.split(",").length}) → ${uc.id} over the id list.`,
+    };
+  }
 
   const scored = USE_CASES.map((uc) => ({ uc, score: scoreUseCase(q, uc) })).filter((s) => s.score > 0);
 

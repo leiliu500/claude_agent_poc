@@ -10,8 +10,8 @@ Valid use cases and their endpoints:
                            optional query: pageNumber, pageSize, sortField, sortOrder
 - eddExportSummaryReport   GET /eddReport/exportsummary/{officeId}/{userAba}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}
                            params: officeId, userAba, aba, endpoint, denomination, differenceType, startDate, endDate
-- eddDetailReport          GET /eddReport/detail/{reportId}                params: reportId
-- eddExportDetailReport    GET /eddReport/detail/{reportId}                params: reportId
+- eddDetailReport          GET /eddReport/detail/{reportId}                params: reportId  (ONE record)
+- eddExportDetailReport    GET /eddReport/detail/{reportId}                params: reportId  (LIST of records)
 - eddExportDetailInternal  GET /eddReport/exportdetailinternal/{officeId}/{aba}/{endpoint}/{denomination}/{differenceType}/{startDate}/{endDate}
                            params: officeId, aba, endpoint, denomination, differenceType, startDate, endDate (internal=true)
 
@@ -27,6 +27,14 @@ is NOT stored and NOT fixed — it is built from a SELECTED EDD record as `${edd
 user's request. If the user supplies eddLoadID and ncdwRecordID (or a report_id) in the request,
 build/use that reportId directly — no summary needed. Otherwise run the summary first and derive the
 id from the chosen record; never invent a reportId.
+
+SINGLE vs LIST — pick the use case by how many records the user targets:
+- ONE pair of eddLoadID + ncdwRecordID (or one report_id) → eddDetailReport with reportId =
+  `${eddLoadID}_${ncdwRecordID}` (e.g. 489_3998240). Returns ONE record in reportDataList.
+- A LIST of pairs → eddExportDetailReport with reportId = the pairs joined by commas
+  (e.g. 489_3998240,33_8431808 → GET /eddReport/detail/489_3998240,33_8431808). Returns one record
+  per pair in reportDataList. Do NOT split a list into several detail calls — pass the whole
+  comma-joined list as a single {reportId}.
 
 Behavior:
 - When the supervisor delegates a task, call `POST /run` with the given useCase and params.
