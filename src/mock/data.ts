@@ -39,10 +39,12 @@ const ZONES = ["A1", "A2", "B1", "C3", "D7"];
 // ── EDD ────────────────────────────────────────────────────────────────────────
 // Shaped after the real EDD REST API (see the sample summary/detail responses):
 //   summary → { result: { totalEdds, reportDataList: [ {edd row}, ... ] } }
-//   detail  → { result: { reportDataList: [ { edd: { differenceDetail, depositDetail, ... } } ] } }
-// The summary lists EDD records (each carrying eddLoadID + ncdwRecordID); the detail expands ONE
-// record into its nested sections. The summary→detail chain (and the report memory feature) keys on
-// a `reportId` derived from a record's identifiers: `${eddLoadID}_${ncdwRecordID}`.
+//   detail  → { result: { reportDataList: [ { edd: { differenceDetail, depositDetail, ... } }, ... ] } }
+// The summary lists EDD records (each carrying eddLoadID + ncdwRecordID); the detail expands one OR
+// more records into their nested sections. The summary→detail chain (and the report memory feature)
+// keys on a `reportId` derived from a record's identifiers: `${eddLoadID}_${ncdwRecordID}`. A single
+// pair (eddDetailReport) yields one reportDataList entry; a comma-separated LIST of pairs
+// (eddExportDetailReport, e.g. `489_3998240,33_8431808`) yields one entry per pair.
 const EDD_BANKS = [
   { aba: "052001633", abaName: "BANK OF AMERICA, NA, MD" },
   { aba: "121000248", abaName: "WELLS FARGO BANK, NA" },
@@ -154,19 +156,22 @@ function eddSummaryRows(params: TaskParams): MockPayload {
   };
 }
 
-/** EDD detail: expand one record (identified by reportId) into its nested sections. */
-function eddDetailRows(params: TaskParams, internal: boolean): MockPayload {
-  const fallback = primaryEddKey(params);
-  const reportId = (params.reportId as string) ?? `${fallback.eddLoadID}_${fallback.ncdwRecordID}`;
-  const [loadPart, ncdwPart] = String(reportId).split("_");
-  const rnd = seeded(`edd:detail:${reportId}`);
+/** Parse one `${eddLoadID}_${ncdwRecordID}` pair into a record key, or fall back when malformed. */
+function eddKeyFromPair(pair: string, fallback: EddKey): EddKey {
+  const [loadPart, ncdwPart] = pair.split("_");
+  return /^\d+_\d+$/.test(pair) ? { eddLoadID: Number(loadPart), ncdwRecordID: Number(ncdwPart) } : fallback;
+}
 
-  // Reconstruct the SAME summary record this reportId points at, so the detail is consistent with
-  // what the summary listed (the real workflow: detail of a specific summary row). A numeric
-  // `${eddLoadID}_${ncdwRecordID}` reportId reproduces the summary's primary record exactly.
-  const key: EddKey = /^\d+_\d+$/.test(reportId)
-    ? { eddLoadID: Number(loadPart), ncdwRecordID: Number(ncdwPart) }
-    : fallback;
+/** Build the nested `edd` detail record (and its flat table projection) for one EDD record key. */
+function buildEddDetail(
+  params: TaskParams,
+  key: EddKey,
+  internal: boolean,
+): { edd: Record<string, unknown>; flatRow: Record<string, unknown> } {
+  const rnd = seeded(`edd:detail:${key.eddLoadID}_${key.ncdwRecordID}`);
+
+  // Reconstruct the SAME summary record this key points at, so the detail is consistent with
+  // what the summary listed (the real workflow: detail of a specific summary row).
   const rec = eddSummaryRecord(params, 0, key);
 
   const bank = { aba: String(rec.aba), abaName: String(rec.abaName) };
@@ -249,17 +254,40 @@ function eddDetailRows(params: TaskParams, internal: boolean): MockPayload {
     processingDT: ai.processingDT,
   };
 
+  return { edd, flatRow };
+}
+
+/**
+ * EDD detail: expand the requested record(s) into their nested sections.
+ *
+ * The `reportId` is either ONE `${eddLoadID}_${ncdwRecordID}` pair (eddDetailReport — a single
+ * record) or a comma-separated LIST of such pairs (eddExportDetailReport, e.g.
+ * `489_3998240,33_8431808` — several records exported together). Each pair becomes its own entry
+ * in `result.reportDataList`, matching the real API's single- and multi-record detail responses.
+ */
+function eddDetailRows(params: TaskParams, internal: boolean): MockPayload {
+  const fallback = primaryEddKey(params);
+  const reportId = (params.reportId as string) ?? `${fallback.eddLoadID}_${fallback.ncdwRecordID}`;
+  const pairs = String(reportId).split(",").map((p) => p.trim()).filter(Boolean);
+  const keys = pairs.map((pair) => eddKeyFromPair(pair, fallback));
+  const built = keys.map((key) => buildEddDetail(params, key, internal));
+  const [firstLoad, firstNcdw] = (pairs[0] ?? `${fallback.eddLoadID}_${fallback.ncdwRecordID}`).split("_");
+
   return {
-    rows: [flatRow],
+    rows: built.map((b) => b.flatRow),
     meta: {
       reportId,
-      eddLoadID: loadPart,
-      ncdwRecordID: ncdwPart,
+      reportIds: pairs,
+      // Primary record's ids (first pair); the full list is in `reportIds`.
+      eddLoadID: firstLoad,
+      ncdwRecordID: firstNcdw,
       internal,
-      generatedRows: 1,
-      edd,
-      // Faithful raw API envelope matching the sample detail response.
-      result: { reportDataList: [{ edd }] },
+      generatedRows: built.length,
+      // Primary record's nested detail (kept for single-record consumers).
+      edd: built[0]!.edd,
+      // Faithful raw API envelope: one `{ edd }` per requested record, matching the sample detail
+      // response (single-pair → one entry; list → one entry per pair).
+      result: { reportDataList: built.map((b) => ({ edd: b.edd })) },
     },
   };
 }
