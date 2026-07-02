@@ -36,6 +36,12 @@ YOUR JOB, step by step:
 2. Determine the specific USE CASE(s). If the question implies more than one deliverable
    (for example "give me the summary AND export it", or it explicitly names several use
    cases), select ALL of them — this is an ORCHESTRATION case.
+   EXPORT vs VIEW — when the user asks to "export"/"download" a report, the EXPORT use case is the
+   deliverable, NOT the paged view. "Export the EDD summary report" → eddExportSummaryReport ONLY
+   (hits /eddReport/exportsummary/...), not eddSummaryReport. Only when the user asks for BOTH the
+   view AND an export of it ("give me the summary and export it") do you select both the base
+   report and its export. The same rule applies to detail (eddExportDetailReport vs eddDetailReport)
+   and to the XShip fee family.
 3. Extract parameters from the question. Each collaborator maps its use case to an exact REST
    endpoint, so extract the params that endpoint needs and pass them through verbatim. Dates are
    ISO yyyy-MM-dd; period/quarter looks like "2026-Q2". By TYPE:

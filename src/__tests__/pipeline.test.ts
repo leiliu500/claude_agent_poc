@@ -51,6 +51,16 @@ describe("router", () => {
     expect(ids).toContain("eddExportSummaryReport");
   });
 
+  it("'Export the EDD summary report' routes ONLY to the export use case (not the paged summary)", () => {
+    const d = route(
+      "Export the EDD summary report for endpoint wire, denomination USD, differenceType net, startDate 2026-04-01, endDate 2026-06-30.",
+    );
+    expect(d.type).toBe("EDD");
+    // The export artifact is the primary (and only) deliverable — must not hit /eddReport/summary/.
+    expect(d.tasks[0]!.useCase).toBe("eddExportSummaryReport");
+    expect(d.tasks.map((t) => t.useCase)).not.toContain("eddSummaryReport");
+  });
+
   it("routes ABA download questions to XShipDownload with extracted ABA", () => {
     const d = route("Download shipping activity by ABA 123456789 for zone B1");
     expect(d.type).toBe("XShipDownload");
@@ -568,6 +578,22 @@ describe("EDD mock shapes (realistic API simulation)", () => {
     // The table row is a flat projection (no nested objects, so it renders cleanly).
     expect(detail.rows).toHaveLength(1);
     for (const v of Object.values(detail.rows[0]!)) expect(typeof v).not.toBe("object");
+  });
+
+  it("export summary returns ALL totalEdds records, consistent to the requested aba/endpoint", () => {
+    // A small pageSize proves the export ignores paging and returns the full set.
+    const { rows, meta } = generateMock("eddExportSummaryReport", { ...eddParams, pageSize: 3 });
+    // Full result set (not a page): reportDataList.length === totalEdds.
+    expect(rows.length).toBe(meta.totalEdds);
+    const env = meta.result as { totalEdds: number; reportDataList: unknown[] };
+    expect(env.reportDataList).toHaveLength(meta.totalEdds as number);
+    expect(rows.length).toBeGreaterThan(3); // more than the requested page size
+    // Every record belongs to the filtered aba + endpoint, with ONE consistent endpointName.
+    expect(new Set(rows.map((r) => r.aba))).toEqual(new Set(["052001633"]));
+    expect(new Set(rows.map((r) => r.endpointNumber))).toEqual(new Set(["0520016333300"]));
+    expect(new Set(rows.map((r) => r.endpointName)).size).toBe(1);
+    // Deposit dates/times vary row to row (not a single hardcoded timestamp).
+    expect(new Set(rows.map((r) => r.depositDate)).size).toBeGreaterThan(1);
   });
 
   it("export detail expands a LIST of pairs into one reportDataList entry per pair", () => {

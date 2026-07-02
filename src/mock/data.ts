@@ -101,20 +101,33 @@ function eddSummaryRecord(params: TaskParams, index: number, key: EddKey): Recor
     ? { aba: String(params.aba), abaName: EDD_BANKS.find((b) => b.aba === String(params.aba))?.abaName ?? "BANK OF AMERICA, NA, MD" }
     : EDD_BANKS[index % EDD_BANKS.length]!;
   const endpointNumber = (params.endpoint as string) ?? `${bank.aba}3300`;
-  const armored = EDD_ARMORED[index % EDD_ARMORED.length]!;
+  // One armored carrier per endpoint: rows sharing an endpoint share the carrier (so an
+  // aba/endpoint-filtered export lists a single, consistent endpointName), while a multi-bank
+  // summary still varies because each bank yields a different endpointNumber.
+  const armored = EDD_ARMORED[Math.floor(seeded(`edd:armored:${endpointNumber}`)() * EDD_ARMORED.length)]!;
   const denomination = EDD_DENOMS[Math.floor(rnd() * EDD_DENOMS.length)]!;
   const differenceType = EDD_DIFF_TYPES[Math.floor(rnd() * EDD_DIFF_TYPES.length)]!;
   const units = 1 + Math.floor(rnd() * 3);
   const differenceAmount = (differenceType === "Overage" ? 1 : -1) * denomValue(denomination) * units;
+
+  // The difference is reported a couple of days into the range; the underlying deposit happened a
+  // few days BEFORE that, varying per record (date and time), matching the real export where the
+  // deposit column differs row to row. An isolated stream keeps deposit timing from perturbing the
+  // other fields' values.
+  const differenceDate = `${addDays(eddStartDate(params), 2 + (index % 5))}T00:00:00`;
+  const drnd = seeded(`edd:dep:${key.eddLoadID}:${key.ncdwRecordID}:${index}`);
+  const depositDay = addDays(differenceDate.slice(0, 10), -(1 + Math.floor(drnd() * 12)));
+  const depositClock = `19:${String(20 + Math.floor(drnd() * 25)).padStart(2, "0")}:${String(Math.floor(drnd() * 60)).padStart(2, "0")}`;
+
   return {
     adviceNumber: 40 + index + (key.eddLoadID % 10),
-    differenceDate: `${addDays(eddStartDate(params), 2 + (index % 5))}T00:00:00`,
+    differenceDate,
     aba: bank.aba,
     abaName: bank.abaName,
     endpointNumber,
     depositType: EDD_DEPOSIT_TYPES[Math.floor(rnd() * EDD_DEPOSIT_TYPES.length)],
     endpointName: `${bank.abaName.split(",")[0]} ${armored}`,
-    depositDate: `${eddStartDate(params)}T19:37:16`,
+    depositDate: `${depositDay}T${depositClock}`,
     depositAmount: 1_000_000 + Math.floor(rnd() * 9_000_000),
     denomination,
     denominationFound: null,
@@ -125,14 +138,18 @@ function eddSummaryRecord(params: TaskParams, index: number, key: EddKey): Recor
   };
 }
 
-/** EDD summary: a page of EDD records + the report's reusable reportId. */
-function eddSummaryRows(params: TaskParams): MockPayload {
+/**
+ * EDD summary. The paged view (`eddSummaryReport`) returns one page; the export
+ * (`eddExportSummaryReport`, `opts.exportAll`) returns the FULL result set — all `totalEdds`
+ * records — matching the real exportsummary endpoint where `reportDataList.length === totalEdds`.
+ */
+function eddSummaryRows(params: TaskParams, opts: { exportAll?: boolean } = {}): MockPayload {
   const key = primaryEddKey(params);
   const countSeed = seeded(`edd:count:${key.eddLoadID}`);
   const totalEdds = 5 + Math.floor(countSeed() * 20);
   const pageSize = Math.max(1, Number(params.pageSize ?? 5));
   const pageNumber = Math.max(1, Number(params.pageNumber ?? 1));
-  const count = Math.min(pageSize, totalEdds);
+  const count = opts.exportAll ? totalEdds : Math.min(pageSize, totalEdds);
   const rows = Array.from({ length: count }, (_, i) => eddSummaryRecord(params, i, key));
   // reportId = the primary record's identifiers, which the detail call reuses (`/eddReport/detail/{reportId}`).
   const reportId = (params.reportId as string) ?? `${key.eddLoadID}_${key.ncdwRecordID}`;
@@ -358,7 +375,7 @@ function relationshipRows(params: TaskParams, scope: "abaGroup" | "aba"): MockPa
 export const MOCK_GENERATORS: Record<string, (p: TaskParams) => MockPayload> = {
   // EDD
   eddSummaryReport: (p) => eddSummaryRows(p),
-  eddExportSummaryReport: (p) => eddSummaryRows(p),
+  eddExportSummaryReport: (p) => eddSummaryRows(p, { exportAll: true }),
   eddDetailReport: (p) => eddDetailRows(p, false),
   eddExportDetailReport: (p) => eddDetailRows(p, false),
   eddExportDetailInternal: (p) => eddDetailRows(p, true),
