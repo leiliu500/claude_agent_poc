@@ -284,6 +284,30 @@ export const USE_CASES: readonly UseCaseSpec[] = [
     endpoint: { method: "GET", path: "/xshipdownload/activity/criteria/{criteria}" },
   },
 
+  // ── KB (knowledge base / RAG) ─────────────────────────────────────────────────
+  {
+    id: "kbSearch",
+    type: "KB",
+    label: "Knowledge Base Answer",
+    description:
+      "Answer a knowledge/policy/how-to question from the indexed document corpus (RAG). Embeds the " +
+      "query, retrieves the most similar passages from the Postgres pgvector store, and grounds a " +
+      "cited answer in them. Not user-specific and not a report — needs no identifiers.",
+    keywords: [
+      "knowledge base", "kb", "policy", "policies", "guideline", "guidelines", "procedure",
+      "documentation", "docs", "faq", "how do i", "how to", "what is", "explain", "definition",
+      "help", "reference",
+    ],
+    exportable: false,
+    params: [
+      mk("query", "string", "The natural-language question to answer from the knowledge base.", true),
+      mk("topK", "number", "Maximum number of passages to retrieve (default 6)."),
+    ],
+    // Nominal endpoint: retrieval is performed in-process against pgvector (see shared/kb.ts), not
+    // via an outbound REST call, so executeTask short-circuits before resolveEndpoint for KB.
+    endpoint: { method: "POST", path: "/kb/retrieve" },
+  },
+
   // ── Relationship ──────────────────────────────────────────────────────────────
   {
     id: "xshiFileAbaGroup",

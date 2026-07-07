@@ -213,6 +213,99 @@ AS $$
     LIMIT  1;
 $$;
 
+-- ── Knowledge base (RAG / pgvector) ───────────────────────────────────────────
+-- Backing store for the KB collaborator's Retrieval-Augmented Generation. Documents are chunked and
+-- embedded (Bedrock Titan Text Embeddings V2, 1024-dim) by the ingest-kb Lambda; the KB action-group
+-- Lambda embeds the user's query and retrieves the nearest chunks via fedline.search_kb().
+--
+-- Requires the pgvector extension (available on RDS PostgreSQL 15+ / Aurora Postgres). If the target
+-- instance/role cannot create it, provision it once out-of-band; the rest of this block is guarded so
+-- a failed CREATE EXTENSION is the only thing to fix.
+--
+-- IMPORTANT: install the extension (and therefore the `vector` TYPE + operators) into `public`, NOT
+-- into `fedline`. This whole script runs with `search_path = fedline, public`, so a bare
+-- CREATE EXTENSION would land the type in `fedline` — then the unqualified `::vector` casts in the
+-- app queries (ingest INSERT, search_kb call) fail with "type vector does not exist" because the
+-- Lambda connections don't have `fedline` on their search_path. `public` is always on the path.
+-- The DO block relocates the extension if a prior run already created it in another schema.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'vector' AND n.nspname <> 'public'
+    ) THEN
+        ALTER EXTENSION vector SET SCHEMA public;
+    END IF;
+END
+$$;
+CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
+
+-- One row per source document.
+CREATE TABLE IF NOT EXISTS fedline.kb_document (
+    doc_id      TEXT PRIMARY KEY,             -- stable id (e.g. the S3 key)
+    title       TEXT NOT NULL,
+    source_uri  TEXT,                         -- where the doc came from (s3://..., kb://...)
+    content_hash TEXT,                        -- hash of the source text; lets ingest skip unchanged docs
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per chunk of a document, with its embedding. 1024 = Titan Text Embeddings V2 dimension;
+-- keep this in sync with KB_EMBED_DIM in src/shared/kb.ts.
+CREATE TABLE IF NOT EXISTS fedline.kb_chunk (
+    chunk_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    doc_id      TEXT NOT NULL REFERENCES fedline.kb_document (doc_id) ON DELETE CASCADE,
+    chunk_index INT  NOT NULL,
+    content     TEXT NOT NULL,
+    embedding   vector(1024) NOT NULL,
+    metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    UNIQUE (doc_id, chunk_index)
+);
+
+-- Approximate-nearest-neighbour index for cosine distance (pgvector HNSW).
+CREATE INDEX IF NOT EXISTS kb_chunk_embedding_hnsw
+    ON fedline.kb_chunk USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS kb_chunk_doc_idx
+    ON fedline.kb_chunk (doc_id);
+
+-- Upsert a document's metadata row. Returns the doc_id so the caller can attach chunks.
+CREATE OR REPLACE FUNCTION fedline.upsert_kb_document(
+    p_doc_id       TEXT,
+    p_title        TEXT,
+    p_source_uri   TEXT,
+    p_content_hash TEXT,
+    p_metadata     JSONB
+) RETURNS TEXT
+LANGUAGE sql
+AS $$
+    INSERT INTO fedline.kb_document (doc_id, title, source_uri, content_hash, metadata)
+    VALUES (p_doc_id, p_title, p_source_uri, p_content_hash, COALESCE(p_metadata, '{}'::jsonb))
+    ON CONFLICT (doc_id) DO UPDATE
+        SET title        = EXCLUDED.title,
+            source_uri   = EXCLUDED.source_uri,
+            content_hash = EXCLUDED.content_hash,
+            metadata     = EXCLUDED.metadata,
+            updated_at   = now()
+    RETURNING doc_id;
+$$;
+
+-- Retrieve the nearest chunks to a query embedding. Returns cosine SIMILARITY (1 - distance) as
+-- `score` (higher is closer), joined with the parent document's title/source.
+CREATE OR REPLACE FUNCTION fedline.search_kb(p_query vector(1024), p_match_count INT DEFAULT 6)
+RETURNS TABLE (doc_id TEXT, title TEXT, content TEXT, source_uri TEXT, score DOUBLE PRECISION)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT c.doc_id, d.title, c.content, d.source_uri,
+           1 - (c.embedding <=> p_query) AS score
+    FROM   fedline.kb_chunk c
+    JOIN   fedline.kb_document d ON d.doc_id = c.doc_id
+    ORDER  BY c.embedding <=> p_query
+    LIMIT  GREATEST(p_match_count, 1);
+$$;
+
 -- ============================================================================
 -- Seed data
 -- ============================================================================

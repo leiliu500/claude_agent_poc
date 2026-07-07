@@ -25,6 +25,8 @@ const LAMBDAS = [
   { name: "action-xship-download", entry: "src/lambdas/action-groups/xship-download/handler.ts" },
   { name: "action-relationship", entry: "src/lambdas/action-groups/relationship/handler.ts" },
   { name: "action-db", entry: "src/lambdas/action-groups/db/handler.ts" },
+  { name: "action-kb", entry: "src/lambdas/action-groups/kb/handler.ts" },
+  { name: "ingest-kb", entry: "src/lambdas/ingest-kb/handler.ts" },
   { name: "dispatch", entry: "src/lambdas/dispatch/handler.ts" },
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },
   { name: "report", entry: "src/lambdas/report/handler.ts" },
