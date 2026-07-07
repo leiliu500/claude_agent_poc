@@ -38,6 +38,12 @@ variable "vpc_cidr" {
   default     = "10.42.0.0/16"
 }
 
+variable "enable_kb_vpc_endpoints" {
+  description = "Create interface (bedrock-runtime) + gateway (S3) VPC endpoints so the KB Lambdas can reach Bedrock + S3 from the private subnets (the VPC has no NAT). Disable to skip the endpoint cost if KB is unused."
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

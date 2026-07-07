@@ -6,14 +6,20 @@
  * it honours these shapes.
  */
 
-/** The four top-level report domains. */
-export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship";
+/**
+ * The top-level domains a collaborator can own. Four are report domains; `KB` is the
+ * knowledge-base (RAG) domain — it answers questions from indexed documents instead of
+ * running a report. It rides the same supervisor→flow→FinalReport pipeline, surfacing its
+ * grounded answer as the report summary and its citations as the section rows.
+ */
+export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship" | "KB";
 
 export const AGENT_TYPES: readonly AgentType[] = [
   "EDD",
   "XShipReport",
   "XShipDownload",
   "Relationship",
+  "KB",
 ] as const;
 
 /** A specific task within a type (canonical, camelCase identifiers). */
@@ -60,6 +66,12 @@ export interface TaskParams {
   // XShipDownload path params.
   requestId?: string;
   criteria?: string;
+
+  // KB (knowledge base / RAG) params.
+  /** The natural-language question to retrieve knowledge-base passages for. */
+  query?: string;
+  /** Max passages to retrieve (defaults applied downstream). */
+  topK?: number;
 
   [key: string]: unknown;
 }

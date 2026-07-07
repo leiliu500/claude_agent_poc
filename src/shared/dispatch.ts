@@ -10,6 +10,7 @@
 import type { DispatchResult, TaskParams, TaskRequest } from "./types.js";
 import { getUseCase, resolveEndpoint } from "./usecases.js";
 import { generateMock } from "../mock/data.js";
+import { runKbQuery } from "./kb.js";
 
 export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
   const start = hrMs();
@@ -36,6 +37,48 @@ export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
       latencyMs: hrMs() - start,
     };
   }
+  // KB (knowledge base / RAG) is answered in-process against the pgvector store (or the in-memory
+  // corpus), not via a mock REST backend — short-circuit before generateMock/resolveEndpoint.
+  if (task.type === "KB") {
+    try {
+      const kb = await runKbQuery({
+        query: typeof task.params.query === "string" ? task.params.query : "",
+        topK: typeof task.params.topK === "number" ? task.params.topK : undefined,
+      });
+      return {
+        type: task.type,
+        useCase: task.useCase,
+        status: "ok",
+        // Rows = the cited passages (render as a citations table); scalar answer lives in meta.
+        data: kb.passages.map((p) => ({
+          title: p.title,
+          source: p.sourceUri ?? "",
+          score: p.score,
+          snippet: p.content.length > 240 ? p.content.slice(0, 237) + "…" : p.content,
+        })),
+        meta: {
+          label: spec.label,
+          answer: kb.answer,
+          citations: kb.citations,
+          query: task.params.query ?? "",
+          matched: kb.passages.length,
+          retrieval: kb.source,
+        },
+        latencyMs: hrMs() - start,
+      };
+    } catch (err) {
+      return {
+        type: task.type,
+        useCase: task.useCase,
+        status: "error",
+        data: [],
+        meta: {},
+        error: err instanceof Error ? err.message : String(err),
+        latencyMs: hrMs() - start,
+      };
+    }
+  }
+
   try {
     const payload = generateMock(task.useCase, task.params);
     // Resolve the exact backend REST endpoint this use case maps to. A real client would call

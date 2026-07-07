@@ -1,0 +1,73 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "KB Action Group",
+    "version": "1.0.0",
+    "description": "Answer a knowledge/policy/how-to question from the indexed document corpus (RAG). The agent calls POST /run with { useCase: \"kbSearch\", params: { query, topK } }; the Lambda embeds the query with Bedrock Titan embeddings, retrieves the nearest passages from the Postgres pgvector store (fedline.search_kb), and returns a DispatchResult where meta.answer is the grounded answer, meta.citations lists the sources, and data holds the retrieved passages (title, source, score, snippet)."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "runKbUseCase",
+        "summary": "Answer a knowledge-base question from the indexed corpus (RAG).",
+        "description": "Runs the kbSearch use case: embeds the query, retrieves the most similar passages from the pgvector knowledge store, and returns a grounded, cited answer. Not user-specific; needs no identifiers.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["useCase"],
+                "properties": {
+                  "useCase": {
+                    "type": "string",
+                    "description": "The KB use case to execute.",
+                    "enum": ["kbSearch"]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Retrieval parameters.",
+                    "required": ["query"],
+                    "properties": {
+                      "query": {
+                        "type": "string",
+                        "description": "The natural-language question to answer from the knowledge base."
+                      },
+                      "topK": {
+                        "type": "number",
+                        "description": "Maximum number of passages to retrieve (default 6)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Grounded knowledge-base answer with retrieved passages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "useCase": { "type": "string" },
+                    "status": { "type": "string" },
+                    "data": { "type": "array", "items": { "type": "object" } },
+                    "meta": {
+                      "type": "object",
+                      "description": "answer (grounded text), citations (sources), query, matched, retrieval."
+                    },
+                    "latencyMs": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

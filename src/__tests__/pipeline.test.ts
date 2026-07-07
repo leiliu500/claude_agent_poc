@@ -622,6 +622,131 @@ describe("EDD mock shapes (realistic API simulation)", () => {
   });
 });
 
+describe("KB (knowledge base / RAG)", () => {
+  it("routes a clear knowledge question to the KB type", () => {
+    const d = route("What is the knowledge base guideline?");
+    expect(d.type).toBe("KB");
+    expect(d.tasks[0]!.useCase).toBe("kbSearch");
+  });
+
+  it("answers a kbSearch task from the in-memory corpus with grounded passages + citations", async () => {
+    const results = await executeTasks([
+      { type: "KB", useCase: "kbSearch", params: { query: "How is the EDD detail reportId derived?" } },
+    ]);
+    expect(results).toHaveLength(1);
+    const kb = results[0]!;
+    expect(kb.status).toBe("ok");
+    expect(kb.data.length).toBeGreaterThan(0); // retrieved passages
+    expect(typeof kb.meta.answer).toBe("string");
+    expect(String(kb.meta.answer)).toMatch(/eddLoadID|ncdwRecordID|reportId/i); // grounded in the corpus
+    expect(Array.isArray(kb.meta.citations)).toBe(true);
+    expect((kb.meta.citations as string[]).length).toBeGreaterThan(0);
+    expect(kb.meta.retrieval).toBe("memory"); // no DATABASE_URL in tests
+  });
+
+  it("surfaces the grounded answer + sources as the report summary", async () => {
+    const question = "What is the XShip fee waiver policy?";
+    const results = await executeTasks([{ type: "KB", useCase: "kbSearch", params: { query: question } }]);
+    const analytics = runAnalytics(results);
+    const report = generateReport({
+      question,
+      type: "KB",
+      dispatchResults: results,
+      analytics,
+      generatedAt: "2026-06-25T00:00:00.000Z",
+    });
+    expect(report.type).toBe("KB");
+    expect(report.title).toBe("Knowledge Base Answer");
+    expect(report.summary).toMatch(/Based on the knowledge base/);
+    expect(report.summary).toMatch(/Sources:/);
+    expect(report.sections).toHaveLength(1);
+    expect(report.sections[0]!.rows.length).toBeGreaterThan(0);
+  });
+
+  it("rides the flow-process node: a KB supervisor response becomes a KB report", async () => {
+    // What the supervisor emits for a knowledge question: a KB dispatchResult carrying the answer.
+    const agentResponse = JSON.stringify({
+      type: "KB",
+      tasks: [{ type: "KB", useCase: "kbSearch", params: { query: "What is the XShip fee waiver policy?" } }],
+      dispatchResults: [
+        {
+          type: "KB",
+          useCase: "kbSearch",
+          status: "ok",
+          data: [{ title: "XShip Fee Waiver Policy", source: "kb://policies/xship-fee-waiver.md", score: 0.9, snippet: "Fees may be waived..." }],
+          meta: {
+            answer: "Based on the knowledge base: shipping fees may be waived for a rollup ABA within a period.",
+            citations: ["XShip Fee Waiver Policy — kb://policies/xship-fee-waiver.md"],
+            query: "What is the XShip fee waiver policy?",
+            matched: 1,
+            retrieval: "memory",
+          },
+          latencyMs: 4,
+        },
+      ],
+    });
+    const report = await processHandler({
+      inputs: [
+        { name: "question", value: "What is the XShip fee waiver policy?" },
+        { name: "agentResponse", value: agentResponse },
+      ],
+    });
+    expect(report.type).toBe("KB");
+    expect(report.title).toBe("Knowledge Base Answer");
+    expect(report.summary).toMatch(/waived/);
+    expect(report.summary).toMatch(/Sources:/);
+    expect(report.sections).toHaveLength(1);
+  });
+
+  it("flow-process falls back to local KB routing when the supervisor output is unusable", async () => {
+    // No structured supervisor output → deterministic orchestration. An authenticated KB question
+    // routes to KB locally and still produces a grounded answer (no user-name error for knowledge).
+    const report = await processHandler({
+      inputs: [
+        { name: "question", value: "What is the knowledge base guideline?" },
+        { name: "agentResponse", value: "no structured output" },
+        { name: "auth", value: JSON.stringify({ userId: "1", userName: "Lei Liu", identifiers: {} }) },
+      ],
+    });
+    expect(report.type).toBe("KB");
+    expect(report.sections.length).toBeGreaterThan(0);
+  });
+
+  it("returns the Bedrock action-group envelope for a kbSearch call", async () => {
+    const handler = makeActionGroupHandler("KB");
+    const resp = await handler({
+      messageVersion: "1.0",
+      actionGroup: "kb-run",
+      apiPath: "/run",
+      httpMethod: "POST",
+      requestBody: {
+        content: {
+          "application/json": {
+            properties: [
+              { name: "useCase", value: "kbSearch" },
+              { name: "params", value: JSON.stringify({ query: "How do XShip activity downloads work?" }) },
+            ],
+          },
+        },
+      },
+    });
+    expect(resp.response.httpStatusCode).toBe(200);
+    const body = JSON.parse(resp.response.responseBody["application/json"].body);
+    expect(body.type).toBe("KB");
+    expect(body.useCase).toBe("kbSearch");
+    expect(body.status).toBe("ok");
+    expect(typeof body.meta.answer).toBe("string");
+  });
+
+  it("answers with a not-found message when nothing matches", async () => {
+    const results = await executeTasks([
+      { type: "KB", useCase: "kbSearch", params: { query: "zzzq nonexistent xyzzy topic" } },
+    ]);
+    expect(results[0]!.status).toBe("ok");
+    expect(String(results[0]!.meta.answer)).toMatch(/couldn't find/i);
+  });
+});
+
 describe("supervisor output parsing", () => {
   it("extracts the last JSON object from noisy text", () => {
     const text = 'Here is my analysis... {"foo": 1} and final: {"type":"EDD","tasks":[],"dispatchResults":[]}';

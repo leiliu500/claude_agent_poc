@@ -51,6 +51,13 @@ locals {
       lambda_arn                = module.lambda_workers.function_arns["action-db"]
       collaboration_instruction = "Call FIRST with the user name to resolve the user's stored identifiers (userAba, aba, abaGroup, rollupAbaName, endpoint, denomination, differenceType, zone, period, denomType, requestId, criteria) before delegating to the report collaborators. If no user name is present, the request is invalid."
     }
+    kb = {
+      display_name              = "KB"
+      instruction               = file("${path.module}/../src/agents/prompts/kb.txt")
+      api_schema                = file("${path.module}/openapi/kb.json")
+      lambda_arn                = module.lambda_workers.function_arns["action-kb"]
+      collaboration_instruction = "Route here for KNOWLEDGE, policy, procedure, definition, 'how do I' and 'what is' questions answered from the indexed document corpus (RAG). Not a report and not user-specific — no user name or identifiers are required. Call kbSearch with params.query set to the user's question."
+    }
   }
 
   common_tags = {

@@ -17,6 +17,7 @@ const TITLES: Record<AgentType, string> = {
   XShipReport: "XShip Reporting",
   XShipDownload: "XShip Activity Download",
   Relationship: "ABA Relationship Report",
+  KB: "Knowledge Base Answer",
 };
 
 /** Stable, time-free id so report generation is deterministic for tests. */
@@ -60,7 +61,9 @@ export function generateReport(input: ReportInput): FinalReport {
     };
   });
 
-  const summary = buildSummary(type, analytics);
+  // KB answers are conversational: surface the grounded answer (+ citations) as the summary rather
+  // than the report-style "N of M tasks succeeded" line.
+  const summary = type === "KB" ? buildKbSummary(dispatchResults) : buildSummary(type, analytics);
 
   return {
     reportId: reportId(question, type),
@@ -77,6 +80,17 @@ export function generateReport(input: ReportInput): FinalReport {
         rationale: "Routing decided upstream by the supervisor agent.",
       },
   };
+}
+
+/** Summary for a KB answer: the grounded answer text plus its citations, taken from the KB result. */
+function buildKbSummary(results: DispatchResult[]): string {
+  const kb = results.find((r) => r.type === "KB" && r.status === "ok");
+  if (!kb) return "No knowledge-base answer was produced for your question.";
+  const answer = typeof kb.meta.answer === "string" ? kb.meta.answer : "";
+  const citations = Array.isArray(kb.meta.citations) ? (kb.meta.citations as string[]) : [];
+  const parts = [answer || "No answer was produced."];
+  if (citations.length) parts.push(`Sources: ${citations.join("; ")}.`);
+  return parts.join(" ");
 }
 
 function buildSummary(type: AgentType, analytics: AnalyticsResult): string {

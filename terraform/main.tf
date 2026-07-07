@@ -78,6 +78,30 @@ module "lambda_workers" {
       memory_size            = var.lambda_memory_mb
       description            = "DBAgent action-group Lambda: resolve user name -> identifiers (Postgres or in-memory mirror)."
     }
+    # ── KB (knowledge base / RAG) action group. Embeds the query with Bedrock + retrieves from the
+    #    pgvector store when the database is enabled (VPC-attached, DB role for Bedrock+VPC); otherwise
+    #    it degrades to the in-code corpus, exactly like action-db degrades to the in-memory directory. ──
+    "action-kb" = {
+      zip_path               = "${var.dist_dir}/action-kb.zip"
+      role_arn               = module.iam.lambda_db_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = var.lambda_timeout_seconds
+      memory_size            = var.lambda_memory_mb
+      description            = "KB action-group Lambda: RAG answer over pgvector (Bedrock embeddings) or in-code corpus."
+    }
+    # ── KB ingestion: S3-triggered chunk→embed→upsert into pgvector. Only functional with the DB. ──
+    "ingest-kb" = {
+      zip_path               = "${var.dist_dir}/ingest-kb.zip"
+      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = 300
+      memory_size            = 512
+      description            = "S3-triggered: chunk + Bedrock-embed documents and upsert into the pgvector knowledge store."
+    }
     "dispatch" = {
       zip_path    = "${var.dist_dir}/dispatch.zip"
       role_arn    = module.iam.lambda_basic_role_arn

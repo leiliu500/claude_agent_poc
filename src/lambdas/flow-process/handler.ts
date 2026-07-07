@@ -19,7 +19,7 @@
  *
  * Output (to FlowOutput): FinalReport.
  */
-import type { AgentType, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
+import type { AgentType, AuthContext, DispatchResult, FinalReport, TaskRequest } from "../../shared/types.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
 import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
 import { orchestrate, rememberSummaryResults, runTasks } from "../../shared/orchestrator.js";
@@ -67,12 +67,39 @@ function readEvent(event: unknown): { question: string; agentResponse: string; a
 }
 
 /** Decide the dispatch results: prefer the supervisor's output, else deterministic local routing. */
+/**
+ * A KB turn's kbSearch task. KB answers are retrieval-grounded and generated server-side, so we do
+ * NOT trust the supervisor's echoed meta.answer (LLMs drop/mangle long tool outputs). We reconstruct
+ * the query from the agent's KB task/result, falling back to the original question, and re-run it.
+ */
+function kbTaskFrom(parsed: ReturnType<typeof parseSupervisorOutput>, question: string): TaskRequest | undefined {
+  const isKb =
+    parsed.type === "KB" ||
+    parsed.tasks.some((t) => t.type === "KB") ||
+    parsed.dispatchResults.some((r) => r.type === "KB");
+  if (!isKb) return undefined;
+
+  const fromTask = parsed.tasks.find((t) => t.type === "KB");
+  const q =
+    (fromTask && typeof fromTask.params.query === "string" && fromTask.params.query) ||
+    (parsed.dispatchResults.find((r) => r.type === "KB")?.meta?.query as string | undefined) ||
+    question;
+  return { type: "KB", useCase: "kbSearch", params: { query: q } };
+}
+
 async function resolveResults(
   question: string,
   agentResponse: string,
   auth?: AuthContext,
 ): Promise<{ type: AgentType; results: DispatchResult[]; source: string }> {
   const parsed = parseSupervisorOutput(agentResponse);
+
+  // KB: always (re)run the retrieval server-side so the grounded answer is authoritative, regardless
+  // of how the supervisor formatted (or truncated) its echoed KB result.
+  const kbTask = kbTaskFrom(parsed, question);
+  if (kbTask) {
+    return { type: "KB", results: await runTasks([kbTask]), source: "kb-server-side" };
+  }
 
   if (parsed.dispatchResults.length > 0) {
     // The agent already ran the tasks — record any summary reportId so a later turn can reuse it.

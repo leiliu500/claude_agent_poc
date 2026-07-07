@@ -99,6 +99,28 @@ resource "aws_iam_role_policy" "lambda_db_secret" {
   policy = data.aws_iam_policy_document.lambda_db_secret.json
 }
 
+# The KB action Lambda (query embedding + optional generation) and the ingest Lambda (chunk
+# embedding) call Bedrock InvokeModel. Both run on the DB role (they are VPC-attached to reach RDS),
+# so grant InvokeModel here. Scoped to foundation models + inference profiles in this region; harmless
+# for the other DB-role Lambdas that never call Bedrock.
+data "aws_iam_policy_document" "lambda_db_bedrock" {
+  statement {
+    sid     = "InvokeBedrockModels"
+    effect  = "Allow"
+    actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+    resources = [
+      "arn:${local.partition}:bedrock:${local.region}::foundation-model/*",
+      "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:inference-profile/*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "lambda_db_bedrock" {
+  name   = "${var.name_prefix}-lambda-db-bedrock"
+  role   = aws_iam_role.lambda_db.id
+  policy = data.aws_iam_policy_document.lambda_db_bedrock.json
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Bedrock Agent service role (assumed by bedrock.amazonaws.com)
 # ──────────────────────────────────────────────────────────────────────────────

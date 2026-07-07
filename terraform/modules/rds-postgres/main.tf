@@ -13,6 +13,8 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_region" "current" {}
+
 resource "aws_vpc" "this" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -96,6 +98,64 @@ resource "aws_db_instance" "this" {
   vpc_security_group_ids = [aws_security_group.db.id]
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-fedline" })
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# VPC endpoints — the KB Lambdas (action-kb, ingest-kb) run in these private subnets to reach RDS,
+# but also need to call Bedrock (embeddings/generation) and read S3 (ingest). The VPC has no NAT /
+# internet gateway, so we add:
+#   - an INTERFACE endpoint for bedrock-runtime (private access to InvokeModel), and
+#   - a GATEWAY endpoint for S3 (private access to GetObject during ingestion).
+# Guarded by var.enable_kb_vpc_endpoints so a DB-only deployment can opt out of the endpoint cost.
+# ──────────────────────────────────────────────────────────────────────────────
+resource "aws_route_table" "private" {
+  count  = var.enable_kb_vpc_endpoints ? 1 : 0
+  vpc_id = aws_vpc.this.id
+  tags   = merge(var.tags, { Name = "${var.name_prefix}-db-private-rt" })
+}
+
+resource "aws_route_table_association" "private" {
+  count          = var.enable_kb_vpc_endpoints ? 2 : 0
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[0].id
+}
+
+# Security group for the interface endpoint: allow HTTPS from the Lambda SG only.
+resource "aws_security_group" "vpce" {
+  count       = var.enable_kb_vpc_endpoints ? 1 : 0
+  name        = "${var.name_prefix}-db-vpce-sg"
+  description = "HTTPS to interface VPC endpoints from the VPC Lambdas."
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    description     = "HTTPS from VPC Lambdas."
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.lambda.id]
+  }
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-db-vpce-sg" })
+}
+
+resource "aws_vpc_endpoint" "bedrock_runtime" {
+  count               = var.enable_kb_vpc_endpoints ? 1 : 0
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${data.aws_region.current.region}.bedrock-runtime"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpce[0].id]
+  private_dns_enabled = true
+  tags                = merge(var.tags, { Name = "${var.name_prefix}-bedrock-runtime-vpce" })
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  count             = var.enable_kb_vpc_endpoints ? 1 : 0
+  vpc_id            = aws_vpc.this.id
+  service_name      = "com.amazonaws.${data.aws_region.current.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private[0].id]
+  tags              = merge(var.tags, { Name = "${var.name_prefix}-s3-vpce" })
 }
 
 # Store credentials + connection info in Secrets Manager (production-preferred over plaintext env).
