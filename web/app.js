@@ -50,6 +50,7 @@
     "Give me the EDD detail report and export it for 2026-Q2.",
     "XShip fee summary and fee detail for 2026-Q2.",
     "Download shipping activity for zone B1.",
+    "How is the EDD detail reportId derived from a summary record?",
     "What is the ABA group relationship in the xshi file for group 100?",
     "Export the XShip fee summary for 2026-Q2 as Excel.",
     "Give me the EDD detail report for 2026-Q2 as PDF.",
@@ -202,7 +203,7 @@
     ]);
   }
 
-  function renderSection(sec, idx) {
+  function renderSection(sec, idx, opts = {}) {
     const rows = Array.isArray(sec.rows) ? sec.rows : [];
     const meta = sec.meta || {};
     const metaBits = [];
@@ -210,7 +211,7 @@
     if (typeof meta.generatedRows === "number") metaBits.push(meta.generatedRows + " rows");
     const summaryRow = el("summary", {}, [
       el("span", { class: "caret", text: "▸" }),
-      el("span", { text: sec.heading || sec.useCase || ("Section " + (idx + 1)) }),
+      el("span", { text: opts.heading || sec.heading || sec.useCase || ("Section " + (idx + 1)) }),
       el("span", { class: "sec-meta" }, metaBits.map((b) => el("span", { text: b }))),
     ]);
 
@@ -223,21 +224,77 @@
     if (rows.length) body.appendChild(renderTable(sec.columns, rows));
     else body.appendChild(el("div", { class: "report-summary", text: "No rows returned." }));
 
-    return el("details", { class: "section", ...(idx === 0 ? { open: "" } : {}) }, [summaryRow, body]);
+    const isOpen = opts.open !== undefined ? opts.open : idx === 0;
+    return el("details", { class: "section", ...(isOpen ? { open: "" } : {}) }, [summaryRow, body]);
+  }
+
+  // Pull the KB (RAG) answer + provenance out of a KB report's section meta, when present.
+  function kbInfo(report) {
+    if (!report || report.type !== "KB") return null;
+    const sec = (report.sections || []).find(
+      (s) => s.meta && (s.meta.answer !== undefined || s.meta.retrieval !== undefined),
+    );
+    const meta = (sec && sec.meta) || {};
+    return {
+      answer: (typeof meta.answer === "string" && meta.answer) || report.summary || "",
+      citations: Array.isArray(meta.citations) ? meta.citations : [],
+      retrieval: meta.retrieval || "",
+      matched: typeof meta.matched === "number" ? meta.matched : sec && sec.rows ? sec.rows.length : 0,
+      query: meta.query || "",
+    };
+  }
+
+  // The RAG "used the knowledge base" card: badge, grounded answer, retrieval provenance, sources.
+  function renderKbCard(kb) {
+    const sourceLabel =
+      kb.retrieval === "postgres" ? "pgvector" : kb.retrieval === "memory" ? "in-memory corpus" : kb.retrieval || "—";
+    const provText =
+      kb.retrieval === "postgres"
+        ? `Retrieved ${kb.matched} passage(s) from the pgvector knowledge base.`
+        : kb.retrieval === "memory"
+          ? `Retrieved ${kb.matched} passage(s) from the built-in corpus.`
+          : `Retrieved ${kb.matched} passage(s).`;
+
+    const head = el("div", { class: "kb-head" }, [
+      el("span", { class: "kb-icon", text: "🔎" }),
+      el("span", { class: "kb-label", text: "Retrieval-Augmented Answer" }),
+      el("span", { class: "badge rag", text: "RAG" }),
+      el("span", { class: "kb-source", title: "retrieval source", text: sourceLabel }),
+    ]);
+
+    const children = [head, el("div", { class: "kb-answer", text: kb.answer })];
+    children.push(el("div", { class: "kb-prov", text: provText }));
+    if (kb.citations.length) {
+      children.push(
+        el("div", { class: "kb-cite" }, [
+          el("div", { class: "kb-cite-label", text: "Sources" }),
+          el("ul", { class: "kb-cite-list" }, kb.citations.map((c) => el("li", { text: c }))),
+        ]),
+      );
+    }
+    return el("div", { class: "kb-card" }, children);
   }
 
   function renderReport(report) {
     const wrap = el("div", { class: "report" });
+    const kb = kbInfo(report);
 
     wrap.appendChild(el("div", { class: "report-head" }, [
       el("span", { class: "report-title", text: report.title || "Report" }),
-      report.type ? el("span", { class: "badge", text: report.type }) : null,
+      report.type ? el("span", { class: "badge", text: report.type === "KB" ? "Knowledge Base" : report.type }) : null,
+      kb ? el("span", { class: "badge rag", text: "RAG" }) : null,
       report.routing && report.routing.requiresOrchestration ? el("span", { class: "badge", text: "orchestrated" }) : null,
     ]));
 
-    if (report.summary) wrap.appendChild(el("div", { class: "report-summary", text: report.summary }));
+    // KB: show the grounded answer + provenance card (replaces the generic summary line).
+    if (kb) wrap.appendChild(renderKbCard(kb));
+    else if (report.summary) wrap.appendChild(el("div", { class: "report-summary", text: report.summary }));
 
-    (report.sections || []).forEach((sec, i) => wrap.appendChild(renderSection(sec, i)));
+    // For KB the section rows are the retrieved passages (evidence) — relabel + collapse them so the
+    // answer card stays the focus. Report sections render normally (first open).
+    (report.sections || []).forEach((sec, i) =>
+      wrap.appendChild(kb ? renderSection(sec, i, { open: false, heading: "Retrieved passages" }) : renderSection(sec, i)),
+    );
 
     // Export controls (tables remain the default view; these download other formats).
     wrap.appendChild(buildExportBar(report));
