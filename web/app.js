@@ -1,4 +1,4 @@
-/* Fedline Assistant — login + session, chat logic, flexible FinalReport rendering. No dependencies. */
+/* Agentic API Gateway — login + session, chat logic, flexible FinalReport rendering. No dependencies. */
 (() => {
   "use strict";
 
@@ -160,7 +160,7 @@
     const node = el("div", { class: "msg assistant" }, [
       el("div", { class: "avatar", text: "AI" }),
       el("div", { class: "body" }, [
-        el("div", { class: "role", text: "Fedline Assistant" }),
+        el("div", { class: "role", text: "Agentic API Gateway" }),
         content,
       ]),
     ]);

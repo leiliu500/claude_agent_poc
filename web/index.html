@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Fedline Assistant</title>
+    <title>Agentic API Gateway</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -11,9 +11,9 @@
     <div class="login-view" id="loginView" hidden>
       <form class="login-card" id="loginForm">
         <div class="login-logo">🔐</div>
-        <h1>Fedline Assistant</h1>
-        <p class="login-sub">Sign in to run EDD, XShip and Relationship analyses. Your office and IDs
-           are attached automatically once you sign in.</p>
+        <h1>Agentic API Gateway</h1>
+        <p class="login-sub">Sign in to run reports, submit files, and call any registered application.
+           Your identity and IDs are attached automatically once you sign in.</p>
         <label class="field">
           <span>Username</span>
           <input type="text" id="loginUser" autocomplete="username" required autofocus />
@@ -50,8 +50,8 @@
         <header class="topbar">
           <button class="icon-btn" id="sidebarToggle" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
           <div class="title">
-            <span class="brand">Fedline Assistant</span>
-            <span class="subtitle">EDD · XShip · Relationship — Bedrock agentic backend</span>
+            <span class="brand">Agentic API Gateway</span>
+            <span class="subtitle">Fedline · SCP · any registered app — Bedrock agentic backend</span>
           </div>
           <div class="status" id="connStatus" title="API endpoint">…</div>
           <div class="user-box" id="userBox" hidden>
@@ -63,9 +63,9 @@
         <section class="chat" id="chat">
           <div class="welcome" id="welcome">
             <div class="welcome-logo">📊</div>
-            <h1 id="welcomeHeading">How can I help with your analysis?</h1>
-            <p>Ask in plain language for an EDD, XShip, or ABA relationship analysis.
-               Responses render with summaries, highlights, and data tables.</p>
+            <h1 id="welcomeHeading">How can I help?</h1>
+            <p>Ask in plain language — run a Fedline report, submit an SCP file, or call any registered
+               application. Responses render with summaries, highlights, and data tables.</p>
             <div class="welcome-chips" id="welcomeChips"></div>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
@@ -97,7 +97,7 @@
                 id="input"
                 class="composer-input"
                 rows="1"
-                placeholder="Message Fedline Assistant…   (Enter to send, Shift+Enter for newline)"
+                placeholder="Message Agentic API Gateway…   (Enter to send, Shift+Enter for newline)"
                 autocomplete="off"
               ></textarea>
               <button type="submit" class="send-btn" id="sendBtn" title="Send" aria-label="Send">
