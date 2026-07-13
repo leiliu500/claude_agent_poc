@@ -23,6 +23,7 @@ import {
   type BackendAuth,
   type BackendOperation,
   type OperationMatch,
+  type PostDispatchPolicy,
   type RegisterBackendInput,
   type RegisteredBackend,
 } from "./types.js";
@@ -70,17 +71,19 @@ function toBackend(input: RegisterBackendInput): RegisteredBackend {
     baseUrl: input.baseUrl.replace(/\/+$/, ""),
     auth: input.auth ?? DEFAULT_AUTH,
     operations,
+    ...(input.postDispatch ? { postDispatch: input.postDispatch } : {}),
   };
 }
 
 // ── Postgres persistence ──────────────────────────────────────────────────────────
 async function persistPostgres(b: RegisteredBackend): Promise<void> {
-  await query("SELECT fedline.upsert_gateway_backend($1,$2,$3,$4,$5::jsonb)", [
+  await query("SELECT fedline.upsert_gateway_backend($1,$2,$3,$4,$5::jsonb,$6::jsonb)", [
     b.backendId,
     b.name,
     b.description,
     b.baseUrl,
     JSON.stringify(b.auth),
+    b.postDispatch ? JSON.stringify(b.postDispatch) : null,
   ]);
   await query("DELETE FROM fedline.gateway_operation WHERE backend_id = $1", [b.backendId]);
   for (const op of b.operations) {
@@ -127,8 +130,8 @@ function rowToOperation(r: OpRow): BackendOperation {
 }
 
 async function loadBackendPostgres(backendId: string): Promise<RegisteredBackend | undefined> {
-  const meta = await query<{ name: string; description: string; base_url: string; auth: unknown }>(
-    "SELECT name, description, base_url, auth FROM fedline.gateway_backend WHERE backend_id = $1",
+  const meta = await query<{ name: string; description: string; base_url: string; auth: unknown; post_dispatch: unknown }>(
+    "SELECT name, description, base_url, auth, post_dispatch FROM fedline.gateway_backend WHERE backend_id = $1",
     [backendId],
   );
   if (meta.length === 0) return undefined;
@@ -144,6 +147,9 @@ async function loadBackendPostgres(backendId: string): Promise<RegisteredBackend
     baseUrl: m.base_url,
     auth: (m.auth && typeof m.auth === "object" ? m.auth : DEFAULT_AUTH) as BackendAuth,
     operations: ops.map(rowToOperation),
+    ...(m.post_dispatch && typeof m.post_dispatch === "object"
+      ? { postDispatch: m.post_dispatch as PostDispatchPolicy }
+      : {}),
   };
 }
 

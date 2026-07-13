@@ -62,6 +62,34 @@ export interface BackendAuth {
   valueEnv?: string;
 }
 
+/**
+ * What happens AFTER the gateway proxy invokes an operation — declared per backend so each registered
+ * application can diverge completely once dispatch returns. Two modes:
+ *   - "passthrough": shape the raw response and return it (e.g. SCP's text ack). No extra agents.
+ *   - "agents":      spawn the listed ephemeral, in-process agents in order (analytics → report), each
+ *                    built at call time from its app-specific prompt, run to completion, then discarded.
+ * The policy travels as backend registry metadata (durable in pgvector, or in the in-memory catalog),
+ * so a new app declares its post-dispatch pipeline at registration with no code change / redeploy.
+ */
+export type PostDispatchMode = "passthrough" | "agents";
+
+/** One ephemeral post-dispatch agent: an app-specific prompt run once over the dispatch result, then GC'd. */
+export interface PostDispatchAgentSpec {
+  /** What this agent does. "analytics" derives insights over the rows; "report" transforms them into prose. */
+  role: "analytics" | "report";
+  /** App-specific system/instruction prompt (stored as registry metadata). */
+  prompt: string;
+  /** Optional model id override (else POSTDISPATCH_MODEL / FOUNDATION_MODEL). */
+  model?: string;
+}
+
+/** Per-backend post-dispatch policy. Absent ⇒ passthrough (current deterministic behavior). */
+export interface PostDispatchPolicy {
+  mode: PostDispatchMode;
+  /** Ordered agents to spawn for mode "agents" (analytics first, report second). */
+  agents?: PostDispatchAgentSpec[];
+}
+
 /** A backend application registered with the gateway. */
 export interface RegisteredBackend {
   backendId: string;
@@ -71,6 +99,8 @@ export interface RegisteredBackend {
   baseUrl: string;
   auth: BackendAuth;
   operations: BackendOperation[];
+  /** What runs after a successful invoke of this backend (per-app divergence). Absent ⇒ passthrough. */
+  postDispatch?: PostDispatchPolicy;
   createdAt?: string;
 }
 
@@ -85,6 +115,8 @@ export interface RegisterBackendInput {
   openapi?: unknown;
   /** Pre-parsed operations (alternative to `openapi`). */
   operations?: BackendOperation[];
+  /** Optional per-app post-dispatch policy (analytics/report agents, or passthrough). */
+  postDispatch?: PostDispatchPolicy;
 }
 
 /** A retrieval hit: an operation matched to a question, with its owning backend and score. */

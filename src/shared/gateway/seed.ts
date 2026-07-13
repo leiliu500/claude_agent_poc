@@ -17,10 +17,46 @@
 import { USE_CASES } from "../usecases.js";
 import { registerBackend } from "./registry.js";
 import { pathParamNames } from "./openapi.js";
-import type { BackendOperation, BackendParam, RegisterBackendInput } from "./types.js";
+import type { BackendOperation, BackendParam, PostDispatchPolicy, RegisterBackendInput } from "./types.js";
 
 const FEDLINE_BASE_URL = process.env.FEDLINE_BASE_URL ?? "https://fedline.frb.pvt";
 const SCP_BASE_URL = process.env.SCP_BASE_URL ?? "https://dg2-scp.dev.fedcash-iface1.awscfs.frb.pvt";
+
+/**
+ * Fedline's post-dispatch policy: once the gateway proxy returns Fedline report rows, spawn two
+ * ephemeral in-process agents in order — an analytics agent that derives insights over the returned
+ * records, then a report agent that transforms those insights into an executive summary. Both are
+ * built at call time from the prompts below, run once, and discarded (see shared/postdispatch/*).
+ * SCP, by contrast, gets no policy at all → passthrough (its plain-text ack is surfaced as-is).
+ */
+const FEDLINE_ANALYTICS_PROMPT =
+  "You are Fedline's analytics agent, a short-lived specialist spawned to analyse the records returned " +
+  "by a single Fedline reporting API call (Enhanced Due-Diligence, XShip reporting/downloads, or ABA " +
+  "relationships). You are given the user's question, the operation that ran, the returned rows, and " +
+  "pre-computed deterministic rollups (exact sums/averages/distributions — trust these numbers, do not " +
+  "recompute them). Derive 3–6 concise, decision-useful analytical insights: notable totals, outliers, " +
+  "concentrations, risk signals or anomalies a reviewer should notice. Ground every insight in the data " +
+  "provided; never invent figures. Respond with ONLY a JSON array of insight strings, e.g. " +
+  '["...", "..."]. No prose, no markdown.';
+
+const FEDLINE_REPORT_PROMPT =
+  "You are Fedline's report agent, a short-lived specialist spawned to write the executive summary of a " +
+  "Fedline report. You are given the user's question, the analytics agent's insights, and the " +
+  "deterministic aggregates. Write a single tight paragraph (3–5 sentences) that answers the user's " +
+  "question and foregrounds the most important findings for a compliance/operations reviewer. Be " +
+  "factual and specific to the numbers provided; add no data that is not present. Respond with ONLY the " +
+  "summary paragraph as plain text — no headings, no bullet points, no markdown.";
+
+/** Fedline's two-agent analyze→report pipeline (see shared/postdispatch). */
+export function fedlinePostDispatch(): PostDispatchPolicy {
+  return {
+    mode: "agents",
+    agents: [
+      { role: "analytics", prompt: FEDLINE_ANALYTICS_PROMPT },
+      { role: "report", prompt: FEDLINE_REPORT_PROMPT },
+    ],
+  };
+}
 
 /** Derive the Fedline backend from the canonical report use cases (skipping the non-Fedline KB one). */
 export function fedlineBackend(): RegisterBackendInput {
@@ -53,6 +89,8 @@ export function fedlineBackend(): RegisterBackendInput {
     baseUrl: FEDLINE_BASE_URL,
     auth: { type: "none" },
     operations,
+    // Fedline diverges after dispatch: analytics agent → report agent (both ephemeral, app-prompted).
+    postDispatch: fedlinePostDispatch(),
   };
 }
 
@@ -92,6 +130,8 @@ export function scpBackend(): RegisterBackendInput {
     baseUrl: SCP_BASE_URL,
     auth: { type: "none" },
     operations: [submitEasySim],
+    // SCP just returns its response — no downstream agents. (Explicit; absent would mean the same.)
+    postDispatch: { mode: "passthrough" },
   };
 }
 

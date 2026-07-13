@@ -25,6 +25,7 @@ import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
 import { orchestrate, rememberSummaryResults, runTasks } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
+import { runPostDispatch } from "../../shared/postdispatch/pipeline.js";
 import { createLogger } from "../../shared/logger.js";
 
 const log = createLogger({ mod: "flow-process-node" });
@@ -129,14 +130,28 @@ export const handler = async (event: unknown): Promise<FinalReport> => {
   try {
     const { type, results, source } = await resolveResults(question, agentResponse, auth);
     const analytics = runAnalytics(results);
+
+    // Per-application divergence: after a Gateway dispatch, the target backend's post-dispatch policy
+    // decides what runs next. Fedline spawns ephemeral analytics → report agents (app-specific prompts);
+    // SCP (passthrough) and every non-Gateway path return `undefined` here and keep the deterministic
+    // report. Bounded + fault-tolerant: any timeout/failure also degrades to the deterministic report.
+    const post = await runPostDispatch({ question, results, analytics });
+
     const report = generateReport({
       question,
       type,
       dispatchResults: results,
       analytics,
+      summaryOverride: post?.summary,
+      agentInsights: post?.insights,
       generatedAt: new Date().toISOString(),
     });
-    log.info("process completed", { type, source, sections: report.sections.length });
+    log.info("process completed", {
+      type,
+      source,
+      sections: report.sections.length,
+      postDispatch: post ? post.backendId : "none",
+    });
     return report;
   } catch (err) {
     // Never fail the flow: return a minimal, valid report describing the failure.
