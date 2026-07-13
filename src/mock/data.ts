@@ -33,6 +33,17 @@ function period(params: TaskParams): string {
   return (params.period as string) ?? (params.quarter as string) ?? "2026-Q2";
 }
 
+/** Deterministic v4-style UUID from a seed, so a mock "Request ID" looks real but stays test-stable. */
+function mockUuid(seed: string): string {
+  const r = seeded(`uuid:${seed}`);
+  const h: string[] = [];
+  for (let i = 0; i < 32; i++) h.push(Math.floor(r() * 16).toString(16));
+  h[12] = "4"; // version
+  h[16] = ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16); // variant
+  const s = h.join("");
+  return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
+}
+
 const INSTITUTIONS = ["First National", "Coastal Trust", "Summit Bank", "Harbor Credit Union", "Vista Financial"];
 const ZONES = ["A1", "A2", "B1", "C3", "D7"];
 
@@ -371,6 +382,44 @@ function relationshipRows(params: TaskParams, scope: "abaGroup" | "aba"): MockPa
   return { rows, meta: { scope, generatedRows: rows.length } };
 }
 
+// ── SCP (FedCash interface simulator — gateway backend) ────────────────────────────
+// SCP's submitEasySim returns a plain-text acknowledgement echoing the control block's inputData and
+// a fresh Request ID (also sent as the X-Request-ID header). This mock mirrors that exact shape so a
+// GATEWAY_MOCK submit renders like the real SCP response, e.g.:
+//   Request sent successfully. Request ID: <uuid>
+//
+//   sendFiles 100 smoke_easy EASy nocheck
+function scpInputData(p: TaskParams): string {
+  if (typeof p.inputData === "string") return p.inputData;
+  let pl: unknown = p.payload;
+  if (typeof pl === "string") {
+    try {
+      pl = JSON.parse(pl);
+    } catch {
+      pl = undefined;
+    }
+  }
+  const fromObj = pl && typeof pl === "object" ? (pl as Record<string, unknown>).inputData : undefined;
+  return typeof fromObj === "string" ? fromObj : "";
+}
+
+function scpSubmitEasy(p: TaskParams): MockPayload {
+  const inputData = scpInputData(p);
+  const filename = typeof p.filename === "string" ? p.filename : "";
+  const requestId = mockUuid(`scp:${filename}:${inputData}`);
+  const response = `Request sent successfully. Request ID: ${requestId}\n\n${inputData}`;
+  return {
+    rows: [{ value: response }],
+    meta: {
+      requestId,
+      responseContentType: "text/plain",
+      message: "Request sent successfully.",
+      inputData,
+      response, // surfaced by the report as the response body text
+    },
+  };
+}
+
 /** Dispatch table: useCaseId -> payload generator. */
 export const MOCK_GENERATORS: Record<string, (p: TaskParams) => MockPayload> = {
   // EDD
@@ -394,6 +443,8 @@ export const MOCK_GENERATORS: Record<string, (p: TaskParams) => MockPayload> = {
   // Relationship
   xshiFileAbaGroup: (p) => relationshipRows(p, "abaGroup"),
   xshiFileAba: (p) => relationshipRows(p, "aba"),
+  // SCP (gateway backend)
+  submitEasySim: (p) => scpSubmitEasy(p),
 };
 
 export function generateMock(useCase: string, params: TaskParams): MockPayload {

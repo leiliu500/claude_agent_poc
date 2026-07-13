@@ -1,0 +1,77 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Agentic API Gateway Action Group",
+    "version": "1.0.0",
+    "description": "Route to any application registered with the Agentic API Gateway. Two use cases: gatewayRetrieve finds the registered backend operations most relevant to a question (semantic search over the pgvector registry); gatewayInvoke calls a chosen operation through the generic HTTP proxy. The agent should call gatewayRetrieve first to discover a backendId + operationId, then gatewayInvoke with the required params."
+  },
+  "paths": {
+    "/run": {
+      "post": {
+        "operationId": "runGatewayUseCase",
+        "summary": "Retrieve candidate backend operations, or invoke one through the generic proxy.",
+        "description": "useCase 'gatewayRetrieve' { query, topK? } returns candidate operations (backendId, operationId, method, path, summary, requiredParams, score). useCase 'gatewayInvoke' { backendId, operationId, ...params } calls that operation and returns a DispatchResult (data = response rows, meta = url/httpStatus).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["useCase"],
+                "properties": {
+                  "useCase": {
+                    "type": "string",
+                    "description": "The gateway use case to execute.",
+                    "enum": ["gatewayRetrieve", "gatewayInvoke"]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "For gatewayRetrieve: { query, topK? }. For gatewayInvoke: { backendId, operationId, and the operation's path/query/body params }.",
+                    "properties": {
+                      "query": {
+                        "type": "string",
+                        "description": "gatewayRetrieve: the natural-language request to find a backend operation for."
+                      },
+                      "topK": {
+                        "type": "number",
+                        "description": "gatewayRetrieve: max candidate operations to return (default 5)."
+                      },
+                      "backendId": {
+                        "type": "string",
+                        "description": "gatewayInvoke: the registered backend to call (from a gatewayRetrieve result)."
+                      },
+                      "operationId": {
+                        "type": "string",
+                        "description": "gatewayInvoke: the backend operation to call (from a gatewayRetrieve result)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retrieved candidate operations, or the invoked operation's DispatchResult.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "type": { "type": "string" },
+                    "useCase": { "type": "string" },
+                    "status": { "type": "string" },
+                    "data": { "type": "array", "items": { "type": "object" } },
+                    "meta": { "type": "object" },
+                    "latencyMs": { "type": "number" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

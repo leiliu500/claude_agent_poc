@@ -73,18 +73,39 @@
 
         <footer class="composer">
           <form class="composer-form" id="composerForm">
-            <textarea
-              id="input"
-              class="composer-input"
-              rows="1"
-              placeholder="Message Fedline Assistant…   (Enter to send, Shift+Enter for newline)"
-              autocomplete="off"
-            ></textarea>
-            <button type="submit" class="send-btn" id="sendBtn" title="Send" aria-label="Send">
-              <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
-                <path fill="currentColor" d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a1 1 0 00-1.39 1.2l2.1 6.2L14 12l-9.89.99-2.1 6.2a1 1 0 001.39 1.21z"/>
-              </svg>
-            </button>
+            <!-- Attachment bar: shown only when a file is attached (e.g. an SCP EASy XML upload). -->
+            <div class="attach-bar" id="attachBar" hidden>
+              <div class="attach-chip">
+                <span class="attach-icon">📎</span>
+                <span class="attach-name" id="attachName"></span>
+                <button type="button" class="attach-remove" id="attachRemove" title="Remove file" aria-label="Remove file">✕</button>
+              </div>
+              <textarea
+                id="payloadInput"
+                class="payload-input"
+                rows="2"
+                placeholder='Payload JSON (control block), e.g. {"inputData":"sendFiles 100 smoke_easy EASy nocheck","qmgr":"FCC_SCP_1","seasyq":"FCC.OUT.EASY.SIM.T1","reasyq":"FCC.IN.EASYACK.SIM.T1","easymsgid":"1002"}'
+                autocomplete="off"
+              ></textarea>
+            </div>
+            <div class="composer-row">
+              <button type="button" class="attach-btn" id="attachBtn" title="Attach a file" aria-label="Attach a file">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M16.5 6.5v9a4.5 4.5 0 01-9 0V5a3 3 0 016 0v9.5a1.5 1.5 0 01-3 0V6.5H9V14.5a3 3 0 006 0V5a4.5 4.5 0 00-9 0v10.5a6 6 0 0012 0v-9z"/></svg>
+              </button>
+              <input type="file" id="fileInput" hidden />
+              <textarea
+                id="input"
+                class="composer-input"
+                rows="1"
+                placeholder="Message Fedline Assistant…   (Enter to send, Shift+Enter for newline)"
+                autocomplete="off"
+              ></textarea>
+              <button type="submit" class="send-btn" id="sendBtn" title="Send" aria-label="Send">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                  <path fill="currentColor" d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a1 1 0 00-1.39 1.2l2.1 6.2L14 12l-9.89.99-2.1 6.2a1 1 0 001.39 1.21z"/>
+                </svg>
+              </button>
+            </div>
           </form>
           <div class="composer-hint" id="composerHint">
             The agent path can take 10–30s; if it exceeds the limit the backend returns a fast local result.

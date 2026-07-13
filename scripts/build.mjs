@@ -20,12 +20,13 @@ const LAMBDAS = [
   { name: "api-entrypoint", entry: "src/lambdas/api-entrypoint/handler.ts" },
   { name: "auth-login", entry: "src/lambdas/auth-login/handler.ts" },
   { name: "auth-authorizer", entry: "src/lambdas/auth-authorizer/handler.ts" },
-  { name: "action-edd", entry: "src/lambdas/action-groups/edd/handler.ts" },
-  { name: "action-xship-report", entry: "src/lambdas/action-groups/xship-report/handler.ts" },
-  { name: "action-xship-download", entry: "src/lambdas/action-groups/xship-download/handler.ts" },
-  { name: "action-relationship", entry: "src/lambdas/action-groups/relationship/handler.ts" },
+  // Fedline's former per-domain action Lambdas (action-edd/-xship-report/-xship-download/
+  // -relationship) are retired — Fedline is now a gateway backend served by the generic proxy
+  // (rich mock via mock/data.ts). Remaining action groups: db, kb, gateway.
   { name: "action-db", entry: "src/lambdas/action-groups/db/handler.ts" },
   { name: "action-kb", entry: "src/lambdas/action-groups/kb/handler.ts" },
+  { name: "action-gateway", entry: "src/lambdas/action-groups/gateway/handler.ts" },
+  { name: "gateway-register", entry: "src/lambdas/gateway-register/handler.ts" },
   { name: "ingest-kb", entry: "src/lambdas/ingest-kb/handler.ts" },
   { name: "dispatch", entry: "src/lambdas/dispatch/handler.ts" },
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },

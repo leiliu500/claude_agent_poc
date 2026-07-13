@@ -45,7 +45,7 @@ export interface BedrockActionResponse {
 }
 
 /** Pull `{ useCase, params }` out of either requestBody properties or flat parameters. */
-function parseInput(event: BedrockActionEvent): { useCase: string; params: Record<string, unknown> } {
+export function parseInput(event: BedrockActionEvent): { useCase: string; params: Record<string, unknown> } {
   // Preferred: OpenAPI requestBody (application/json) properties.
   const props = event.requestBody?.content?.["application/json"]?.properties;
 
@@ -70,7 +70,7 @@ function parseInput(event: BedrockActionEvent): { useCase: string; params: Recor
   return { useCase: flat.useCase ?? "", params };
 }
 
-function envelope(
+export function envelope(
   event: BedrockActionEvent,
   httpStatusCode: number,
   body: unknown,

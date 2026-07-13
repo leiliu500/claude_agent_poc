@@ -65,6 +65,12 @@
   const inputEl = $("input");
   const formEl = $("composerForm");
   const sendBtn = $("sendBtn");
+  const attachBtn = $("attachBtn");
+  const fileInput = $("fileInput");
+  const attachBar = $("attachBar");
+  const attachName = $("attachName");
+  const attachRemove = $("attachRemove");
+  const payloadInput = $("payloadInput");
   const connStatus = $("connStatus");
   const appEl = $("app");
   const loginView = $("loginView");
@@ -79,6 +85,8 @@
   const logoutBtn = $("logoutBtn");
 
   let busy = false;
+  let attached = null; // { name, contentBase64 } — a file staged for a gateway upload (e.g. SCP)
+  const MAX_FILE_BYTES = 5 * 1024 * 1024;
   const history = []; // { role, content|report|error }
 
   // ---------- Small DOM helpers ----------
@@ -443,7 +451,7 @@
   }
 
   // ---------- API call ----------
-  async function callApi(question) {
+  async function callApi(question, file, payload) {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), Math.max(5, cfg.timeoutSec) * 1000);
     try {
@@ -455,7 +463,8 @@
           // caller's office/ABA/etc. from it — the question no longer carries identity.
           ...(session ? { authorization: "Bearer " + session.token } : {}),
         },
-        body: JSON.stringify({ question }),
+        // An attached file routes server-side to a gateway file-upload op (bypassing the LLM).
+        body: JSON.stringify(file ? { question, file, payload } : { question }),
         signal: controller.signal,
       });
       const text = await res.text();
@@ -470,8 +479,18 @@
   // ---------- Send flow ----------
   async function send(question) {
     if (busy) return;
-    question = question.trim();
-    if (!question) return;
+
+    // Capture any staged attachment FIRST, so a file-only submit (empty message) is still allowed.
+    const fileToSend = attached;
+    let payloadToSend = fileToSend ? payloadInput.value.trim() : undefined;
+    question = (question || "").trim();
+    if (fileToSend) {
+      // Tolerate the JSON control block being typed into the message box instead of the payload box.
+      if (!payloadToSend && question.startsWith("{")) { payloadToSend = question; question = ""; }
+      // A message is optional when a file is attached — synthesize a routing query from the filename.
+      if (!question) question = `Submit file ${fileToSend.name}`;
+    }
+    if (!question) return; // nothing to send (no message and no file)
 
     // Enforce the session client-side too: if the token has expired, force a fresh login before
     // sending (the server would reject it anyway; this gives a clean UX).
@@ -482,15 +501,16 @@
 
     busy = true;
     sendBtn.disabled = true;
-    addUserMessage(question);
+    addUserMessage(fileToSend ? `${question}   📎 ${fileToSend.name}` : question);
     history.push({ role: "user", content: question });
     inputEl.value = "";
     autosize();
+    clearAttachment();
 
     const ph = addAssistantPlaceholder();
 
     try {
-      const { httpStatus, data } = await callApi(question);
+      const { httpStatus, data } = await callApi(question, fileToSend, payloadToSend);
 
       if (httpStatus === 401 || httpStatus === 403) {
         // Token rejected by the authorizer (expired/invalid) — drop the session and re-gate.
@@ -545,6 +565,41 @@
     }
   });
   formEl.addEventListener("submit", (e) => { e.preventDefault(); send(inputEl.value); });
+
+  // ---------- File attachment (gateway uploads, e.g. SCP EASy files) ----------
+  const DEFAULT_INPUT_PH = inputEl.getAttribute("placeholder");
+  function clearAttachment() {
+    attached = null;
+    fileInput.value = "";
+    payloadInput.value = "";
+    attachName.textContent = "";
+    attachBar.hidden = true;
+    inputEl.setAttribute("placeholder", DEFAULT_INPUT_PH);
+  }
+  attachBtn.addEventListener("click", () => fileInput.click());
+  attachRemove.addEventListener("click", clearAttachment);
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    if (f.size > MAX_FILE_BYTES) {
+      alert("That file is too large (max 5 MB). Attach a smaller file.");
+      fileInput.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const s = String(reader.result || "");
+      // readAsDataURL yields "data:<mime>;base64,<data>" — keep only the base64 payload.
+      attached = { name: f.name, contentBase64: s.includes(",") ? s.slice(s.indexOf(",") + 1) : s };
+      attachName.textContent = `${f.name} (${Math.ceil(f.size / 1024)} KB)`;
+      attachBar.hidden = false;
+      // Make it clear the message is now optional and JSON goes in the payload box below.
+      inputEl.setAttribute("placeholder", "Optional: describe the request… (put the payload JSON in the box below)");
+      payloadInput.focus();
+    };
+    reader.onerror = () => alert("Could not read that file.");
+    reader.readAsDataURL(f);
+  });
 
   // ---------- New chat ----------
   $("newChat").addEventListener("click", () => {

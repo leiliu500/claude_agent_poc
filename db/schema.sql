@@ -306,6 +306,96 @@ AS $$
     LIMIT  GREATEST(p_match_count, 1);
 $$;
 
+-- ── Agentic API Gateway (runtime backend registry / pgvector) ─────────────────
+-- Durable catalog of applications the gateway routes to. A backend is registered at RUNTIME by its
+-- OpenAPI spec (src/shared/gateway/*): its metadata lands in fedline.gateway_backend and each of its
+-- operations (method + path template + params) lands in fedline.gateway_operation with an embedding
+-- of the operation's searchable text (Bedrock Titan Text Embeddings V2, 1024-dim — the SAME model the
+-- KB uses, so gateway retrieval reuses shared/kb.embedText). The supervisor's Gateway collaborator
+-- (and the local orchestrator's gateway fallback) call fedline.search_gateway() to find the operation
+-- most relevant to a question, then invoke it through the generic HTTP proxy.
+--
+-- This is the ONLY durable registry: an in-memory registry lives in a single Lambda process and is
+-- not shared between the register Lambda and the proxy, so runtime registration requires the DB.
+CREATE TABLE IF NOT EXISTS fedline.gateway_backend (
+    backend_id  TEXT PRIMARY KEY,                 -- stable id chosen at registration
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    base_url    TEXT NOT NULL,                     -- every operation path resolves against this
+    auth        JSONB NOT NULL DEFAULT '{"type":"none"}'::jsonb,  -- BackendAuth (secret VALUE never stored)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One row per invocable backend operation, with its embedding. 1024 = Titan v2 (== KB_EMBED_DIM).
+CREATE TABLE IF NOT EXISTS fedline.gateway_operation (
+    op_id        BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    backend_id   TEXT NOT NULL REFERENCES fedline.gateway_backend (backend_id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,                    -- unique within a backend (OpenAPI operationId)
+    method       TEXT NOT NULL,
+    path         TEXT NOT NULL,                    -- path template with {param} placeholders
+    summary      TEXT,
+    description  TEXT,
+    params       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- BackendParam[]
+    keywords     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- lexical hints (unused by the vector path)
+    embedding    vector(1024) NOT NULL,
+    UNIQUE (backend_id, operation_id)
+);
+
+CREATE INDEX IF NOT EXISTS gateway_operation_embedding_hnsw
+    ON fedline.gateway_operation USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS gateway_operation_backend_idx
+    ON fedline.gateway_operation (backend_id);
+
+-- Upsert a backend's metadata row (its operations are replaced separately by the register Lambda).
+CREATE OR REPLACE FUNCTION fedline.upsert_gateway_backend(
+    p_backend_id  TEXT,
+    p_name        TEXT,
+    p_description TEXT,
+    p_base_url    TEXT,
+    p_auth        JSONB
+) RETURNS TEXT
+LANGUAGE sql
+AS $$
+    INSERT INTO fedline.gateway_backend (backend_id, name, description, base_url, auth)
+    VALUES (p_backend_id, p_name, COALESCE(p_description, ''), p_base_url, COALESCE(p_auth, '{"type":"none"}'::jsonb))
+    ON CONFLICT (backend_id) DO UPDATE
+        SET name        = EXCLUDED.name,
+            description  = EXCLUDED.description,
+            base_url     = EXCLUDED.base_url,
+            auth         = EXCLUDED.auth,
+            updated_at   = now()
+    RETURNING backend_id;
+$$;
+
+-- Retrieve the operations nearest a query embedding, joined to their backend. Returns cosine
+-- SIMILARITY (1 - distance) as `score` (higher is closer), mirroring fedline.search_kb.
+CREATE OR REPLACE FUNCTION fedline.search_gateway(p_query vector(1024), p_match_count INT DEFAULT 5)
+RETURNS TABLE (
+    backend_id   TEXT,
+    backend_name TEXT,
+    base_url     TEXT,
+    operation_id TEXT,
+    method       TEXT,
+    path         TEXT,
+    summary      TEXT,
+    description  TEXT,
+    params       JSONB,
+    keywords     JSONB,
+    score        DOUBLE PRECISION
+)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT b.backend_id, b.name AS backend_name, b.base_url,
+           o.operation_id, o.method, o.path, o.summary, o.description, o.params, o.keywords,
+           1 - (o.embedding <=> p_query) AS score
+    FROM   fedline.gateway_operation o
+    JOIN   fedline.gateway_backend b ON b.backend_id = o.backend_id
+    ORDER  BY o.embedding <=> p_query
+    LIMIT  GREATEST(p_match_count, 1);
+$$;
+
 -- ============================================================================
 -- Seed data
 -- ============================================================================

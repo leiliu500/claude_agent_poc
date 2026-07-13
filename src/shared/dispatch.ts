@@ -11,9 +11,22 @@ import type { DispatchResult, TaskParams, TaskRequest } from "./types.js";
 import { getUseCase, resolveEndpoint } from "./usecases.js";
 import { generateMock } from "../mock/data.js";
 import { runKbQuery } from "./kb.js";
+import { invokeBackend } from "./gateway/invoke.js";
 
 export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
   const start = hrMs();
+
+  // Gateway (Agentic API Gateway): route to a registered backend via the generic HTTP proxy. Gateway
+  // ops are NOT in the static USE_CASES registry — the task's useCase is a backend operationId and
+  // params.backendId names the target app. Handle before getUseCase (which only knows report types).
+  if (task.type === "Gateway") {
+    return invokeBackend({
+      backendId: String(task.params.backendId ?? ""),
+      operationId: task.useCase,
+      params: task.params,
+    });
+  }
+
   const spec = getUseCase(task.useCase);
   if (!spec) {
     return {

@@ -18,6 +18,7 @@ const TITLES: Record<AgentType, string> = {
   XShipDownload: "XShip Activity Download",
   Relationship: "ABA Relationship Report",
   KB: "Knowledge Base Answer",
+  Gateway: "Agentic API Gateway Response",
 };
 
 /** Stable, time-free id so report generation is deterministic for tests. */
@@ -61,9 +62,14 @@ export function generateReport(input: ReportInput): FinalReport {
     };
   });
 
-  // KB answers are conversational: surface the grounded answer (+ citations) as the summary rather
-  // than the report-style "N of M tasks succeeded" line.
-  const summary = type === "KB" ? buildKbSummary(dispatchResults) : buildSummary(type, analytics);
+  // KB answers surface the grounded answer as the summary; a Gateway text response (e.g. SCP's ack)
+  // surfaces the response body; everything else gets the "N of M tasks succeeded" line.
+  const summary =
+    type === "KB"
+      ? buildKbSummary(dispatchResults)
+      : type === "Gateway"
+        ? gatewayResponseText(dispatchResults) ?? buildSummary(type, analytics)
+        : buildSummary(type, analytics);
 
   return {
     reportId: reportId(question, type),
@@ -80,6 +86,20 @@ export function generateReport(input: ReportInput): FinalReport {
         rationale: "Routing decided upstream by the supervisor agent.",
       },
   };
+}
+
+/**
+ * The text response body of a Gateway call, when there is one — the mock/real proxy puts a text ack
+ * (e.g. SCP's "Request sent successfully…") in meta.response or as a single { value } row. Used as the
+ * report summary so the UI shows the actual response instead of a generic "1 task succeeded" line.
+ */
+function gatewayResponseText(results: DispatchResult[]): string | undefined {
+  const r = results.find((x) => x.type === "Gateway" && x.status === "ok");
+  if (!r) return undefined;
+  if (typeof r.meta.response === "string" && r.meta.response.trim()) return r.meta.response;
+  const first = r.data?.[0] as Record<string, unknown> | undefined;
+  if (first && typeof first.value === "string" && first.value.trim()) return first.value;
+  return undefined;
 }
 
 /** Summary for a KB answer: the grounded answer text plus its citations, taken from the KB result. */

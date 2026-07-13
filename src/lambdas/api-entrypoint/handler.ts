@@ -14,13 +14,16 @@
  * Agent mode degrades gracefully: if the flow invocation fails, it falls back to local.
  */
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
-import type { AskRequest, AskResponse, AuthContext, FinalReport } from "../../shared/types.js";
+import type { AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { orchestrate } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
 import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
+
+/** Max attached-file size, as base64 length (~5 MB of bytes → ~6.7 MB base64), under API Gateway's 10 MB cap. */
+const MAX_FILE_B64 = 6_800_000;
 
 /** Shape of the context our auth-authorizer Lambda attaches (all values are strings). */
 interface AuthorizerLambdaContext {
@@ -56,7 +59,52 @@ function parseBody(event: AskEvent): AskRequest {
   if (!body.question || typeof body.question !== "string" || !body.question.trim()) {
     throw new ValidationError("Field 'question' is required.");
   }
-  return { question: body.question.trim(), sessionId: body.sessionId };
+  let file: AskFile | undefined;
+  if (body.file) {
+    if (typeof body.file.name !== "string" || typeof body.file.contentBase64 !== "string" || !body.file.contentBase64) {
+      throw new ValidationError("Field 'file' must be { name, contentBase64 }.");
+    }
+    if (body.file.contentBase64.length > MAX_FILE_B64) {
+      throw new ValidationError("Attached file is too large (max ~5 MB).");
+    }
+    file = { name: body.file.name, contentBase64: body.file.contentBase64 };
+  }
+  const payload = typeof body.payload === "string" ? body.payload : undefined;
+  return { question: body.question.trim(), sessionId: body.sessionId, file, payload };
+}
+
+/**
+ * Handle a file-bearing request: the attached file must NOT flow through the supervisor LLM, so we
+ * invoke the VPC-enabled gateway Lambda directly (retrieve the file-upload operation + invoke it via
+ * the generic proxy) and wrap its DispatchResult into a report. Bypasses the Bedrock flow entirely.
+ */
+async function runGatewaySubmit(question: string, file: AskFile, payload: string | undefined, auth?: AuthContext): Promise<FinalReport> {
+  const fn = process.env.GATEWAY_FN;
+  if (!fn) throw new ValidationError("File uploads are not configured on this deployment.");
+
+  // Variable specifier so tsc doesn't require @aws-sdk/client-lambda's types at build time — the SDK
+  // is provided by the Lambda runtime (external in the bundle), so it resolves at runtime.
+  const lambdaMod = "@aws-sdk/client-lambda";
+  const { LambdaClient, InvokeCommand } = (await import(lambdaMod)) as unknown as {
+    LambdaClient: new (cfg: { region?: string }) => { send(cmd: unknown): Promise<{ Payload?: Uint8Array }> };
+    InvokeCommand: new (input: unknown) => unknown;
+  };
+  const client = new LambdaClient({ region: process.env.BEDROCK_REGION ?? process.env.AWS_REGION });
+  const event = { mode: "submit", question, file, payload, identifiers: auth?.identifiers ?? {} };
+  const res = await client.send(new InvokeCommand({ FunctionName: fn, Payload: Buffer.from(JSON.stringify(event)) }));
+  const text = res.Payload ? Buffer.from(res.Payload).toString("utf8") : "";
+  const parsed = text ? (JSON.parse(text) as { ok?: boolean; result?: DispatchResult; error?: string }) : undefined;
+  if (!parsed?.result) throw new ValidationError(parsed?.error ?? "The file submission could not be routed to a backend.");
+
+  const result = parsed.result;
+  const analytics = runAnalytics([result]);
+  return generateReport({
+    question,
+    type: "Gateway",
+    dispatchResults: [result],
+    analytics,
+    generatedAt: new Date().toISOString(),
+  });
 }
 
 function respond(statusCode: number, body: AskResponse): APIGatewayProxyResultV2 {
@@ -126,16 +174,20 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
   const trace = traceId(event);
   const reqLog = log.child({ trace });
   try {
-    const { question } = parseBody(event);
+    const { question, file, payload } = parseBody(event);
 
     // Identity comes from the verified session token (via the authorizer context), not the question
     // text. If the authorizer is wired (production), an unauthenticated request never reaches here;
     // readAuthContext returning undefined means the route is running without an authorizer (e.g.
     // local dev), in which case orchestrate falls back to name-in-question resolution.
     const auth = readAuthContext(event);
-    reqLog.info("ask received", { question, userId: auth?.userId, authenticated: Boolean(auth) });
+    reqLog.info("ask received", { question, userId: auth?.userId, authenticated: Boolean(auth), hasFile: Boolean(file) });
 
-    const report = await produceReport(question, auth);
+    // A file-bearing request is a gateway file-upload (e.g. SCP): handle it deterministically via the
+    // gateway Lambda so the file bytes never enter the LLM. Otherwise run the normal supervisor flow.
+    const report = file
+      ? await runGatewaySubmit(question, file, payload, auth)
+      : await produceReport(question, auth);
 
     reqLog.info("ask completed", { type: report.type, sections: report.sections.length });
     return respond(200, { ok: true, report, traceId: trace });
