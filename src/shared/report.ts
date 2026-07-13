@@ -43,6 +43,16 @@ export interface ReportInput {
   routing?: Pick<RoutingDecision, "type" | "requiresOrchestration" | "rationale">;
   /** Injected by the caller; the flow passes an ISO timestamp from event metadata. */
   generatedAt: string;
+  /**
+   * Post-dispatch report agent's summary (a per-app ephemeral agent, see shared/postdispatch). When
+   * present it replaces the deterministic executive summary. Absent ⇒ the deterministic summary.
+   */
+  summaryOverride?: string;
+  /**
+   * Post-dispatch analytics agent's derived insights. Prepended to the first section's highlights so
+   * the app-specific analysis surfaces at the top of the report.
+   */
+  agentInsights?: string[];
 }
 
 export function generateReport(input: ReportInput): FinalReport {
@@ -62,14 +72,21 @@ export function generateReport(input: ReportInput): FinalReport {
     };
   });
 
-  // KB answers surface the grounded answer as the summary; a Gateway text response (e.g. SCP's ack)
-  // surfaces the response body; everything else gets the "N of M tasks succeeded" line.
+  // Surface a post-dispatch analytics agent's insights at the top of the first section.
+  if (input.agentInsights?.length && sections[0]) {
+    sections[0] = { ...sections[0], highlights: [...input.agentInsights, ...sections[0].highlights] };
+  }
+
+  // A post-dispatch report agent's summary wins outright. Otherwise: KB answers surface the grounded
+  // answer; a Gateway text response (e.g. SCP's ack) surfaces the response body; everything else gets
+  // the "N of M tasks succeeded" line.
   const summary =
-    type === "KB"
+    input.summaryOverride?.trim() ||
+    (type === "KB"
       ? buildKbSummary(dispatchResults)
       : type === "Gateway"
         ? gatewayResponseText(dispatchResults) ?? buildSummary(type, analytics)
-        : buildSummary(type, analytics);
+        : buildSummary(type, analytics));
 
   return {
     reportId: reportId(question, type),

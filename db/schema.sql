@@ -318,14 +318,19 @@ $$;
 -- This is the ONLY durable registry: an in-memory registry lives in a single Lambda process and is
 -- not shared between the register Lambda and the proxy, so runtime registration requires the DB.
 CREATE TABLE IF NOT EXISTS fedline.gateway_backend (
-    backend_id  TEXT PRIMARY KEY,                 -- stable id chosen at registration
-    name        TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    base_url    TEXT NOT NULL,                     -- every operation path resolves against this
-    auth        JSONB NOT NULL DEFAULT '{"type":"none"}'::jsonb,  -- BackendAuth (secret VALUE never stored)
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    backend_id    TEXT PRIMARY KEY,                 -- stable id chosen at registration
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    base_url      TEXT NOT NULL,                     -- every operation path resolves against this
+    auth          JSONB NOT NULL DEFAULT '{"type":"none"}'::jsonb,  -- BackendAuth (secret VALUE never stored)
+    -- PostDispatchPolicy: what runs after a successful invoke (analytics/report agents, or passthrough).
+    -- NULL ⇒ passthrough. Lets each app declare a completely different post-dispatch pipeline as metadata.
+    post_dispatch JSONB,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Idempotent migration for catalogs created before post_dispatch existed.
+ALTER TABLE fedline.gateway_backend ADD COLUMN IF NOT EXISTS post_dispatch JSONB;
 
 -- One row per invocable backend operation, with its embedding. 1024 = Titan v2 (== KB_EMBED_DIM).
 CREATE TABLE IF NOT EXISTS fedline.gateway_operation (
@@ -348,23 +353,27 @@ CREATE INDEX IF NOT EXISTS gateway_operation_backend_idx
     ON fedline.gateway_operation (backend_id);
 
 -- Upsert a backend's metadata row (its operations are replaced separately by the register Lambda).
+-- p_post_dispatch is the PostDispatchPolicy JSON (NULL ⇒ passthrough).
 CREATE OR REPLACE FUNCTION fedline.upsert_gateway_backend(
-    p_backend_id  TEXT,
-    p_name        TEXT,
-    p_description TEXT,
-    p_base_url    TEXT,
-    p_auth        JSONB
+    p_backend_id    TEXT,
+    p_name          TEXT,
+    p_description   TEXT,
+    p_base_url      TEXT,
+    p_auth          JSONB,
+    p_post_dispatch JSONB DEFAULT NULL
 ) RETURNS TEXT
 LANGUAGE sql
 AS $$
-    INSERT INTO fedline.gateway_backend (backend_id, name, description, base_url, auth)
-    VALUES (p_backend_id, p_name, COALESCE(p_description, ''), p_base_url, COALESCE(p_auth, '{"type":"none"}'::jsonb))
+    INSERT INTO fedline.gateway_backend (backend_id, name, description, base_url, auth, post_dispatch)
+    VALUES (p_backend_id, p_name, COALESCE(p_description, ''), p_base_url,
+            COALESCE(p_auth, '{"type":"none"}'::jsonb), p_post_dispatch)
     ON CONFLICT (backend_id) DO UPDATE
-        SET name        = EXCLUDED.name,
-            description  = EXCLUDED.description,
-            base_url     = EXCLUDED.base_url,
-            auth         = EXCLUDED.auth,
-            updated_at   = now()
+        SET name          = EXCLUDED.name,
+            description    = EXCLUDED.description,
+            base_url       = EXCLUDED.base_url,
+            auth           = EXCLUDED.auth,
+            post_dispatch  = EXCLUDED.post_dispatch,
+            updated_at     = now()
     RETURNING backend_id;
 $$;
 

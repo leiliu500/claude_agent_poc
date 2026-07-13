@@ -133,8 +133,11 @@ module "lambda_workers" {
       # Reaches RDS for per-user report memory (recall/remember reportIds). Uses the DB role +
       # VPC placement when the database is enabled; otherwise stays out of the VPC and the memory
       # store degrades to an in-process map (no cross-session persistence, no behavior change).
-      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
-      environment            = merge({ LOG_LEVEL = var.log_level }, local.db_lambda_env)
+      role_arn = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      # POSTDISPATCH_MODEL activates the per-app post-dispatch agents (Fedline analytics→report) via the
+      # Converse API. Bounded + fallback: any failure/timeout degrades to the deterministic report, so
+      # this is safe to enable. Needs the DB role's bedrock:InvokeModel + the bedrock-runtime VPC endpoint.
+      environment            = merge({ LOG_LEVEL = var.log_level, POSTDISPATCH_MODEL = var.foundation_model }, local.db_lambda_env)
       vpc_subnet_ids         = local.db_subnet_ids
       vpc_security_group_ids = local.db_sg_ids
       timeout                = var.lambda_timeout_seconds
