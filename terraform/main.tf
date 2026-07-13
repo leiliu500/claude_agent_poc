@@ -245,8 +245,6 @@ module "api_gateway" {
   entrypoint_lambda_arn    = module.lambda_entrypoint.function_arns["api-entrypoint"]
   entrypoint_invoke_arn    = module.lambda_entrypoint.invoke_arns["api-entrypoint"]
   entrypoint_function_name = module.lambda_entrypoint.function_names["api-entrypoint"]
-  web_serve_invoke_arn     = module.lambda_web.invoke_arns["web-serve"]
-  web_serve_function_name  = module.lambda_web.function_names["web-serve"]
 
   # Auth: login integration + the token authorizer that gates POST /v1/ask.
   login_invoke_arn         = module.lambda_workers.invoke_arns["auth-login"]

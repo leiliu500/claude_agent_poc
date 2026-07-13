@@ -8,16 +8,6 @@ output "api_login_url" {
   value       = module.api_gateway.login_url
 }
 
-output "web_app_url" {
-  description = "Open the chat frontend here (served from the private S3 bucket via API Gateway)."
-  value       = module.api_gateway.app_url
-}
-
-output "web_bucket" {
-  description = "Private S3 bucket holding the frontend bundle. Deploy with: aws s3 sync ../web s3://<this> --delete"
-  value       = aws_s3_bucket.web.id
-}
-
 output "supervisor_agent_id" {
   value = module.bedrock_agents.supervisor_agent_id
 }

@@ -13,7 +13,3 @@ output "login_url" {
   value       = "${aws_apigatewayv2_api.this.api_endpoint}/v1/login"
 }
 
-output "app_url" {
-  description = "URL of the hosted chat frontend."
-  value       = "${aws_apigatewayv2_api.this.api_endpoint}/app"
-}
