@@ -6,6 +6,10 @@ output "lambda_entrypoint_role_arn" {
   value = aws_iam_role.lambda_entrypoint.arn
 }
 
+output "lambda_entrypoint_role_name" {
+  value = aws_iam_role.lambda_entrypoint.name
+}
+
 output "lambda_db_role_arn" {
   value = aws_iam_role.lambda_db.arn
 }

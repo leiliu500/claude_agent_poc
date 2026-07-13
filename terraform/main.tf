@@ -24,6 +24,11 @@ locals {
   db_lambda_env = var.enable_database ? { DATABASE_URL = module.rds_postgres[0].database_url } : {}
   db_subnet_ids = var.enable_database ? module.rds_postgres[0].private_subnet_ids : []
   db_sg_ids     = var.enable_database ? [module.rds_postgres[0].lambda_security_group_id] : []
+
+  # Agentic API Gateway proxy env. GATEWAY_MOCK=true makes the generic proxy return deterministic
+  # synthetic responses instead of making outbound calls (useful before real backends are reachable
+  # from the VPC — the DB subnets have no NAT). Off in real deploys so the proxy actually calls apps.
+  gateway_lambda_env = var.gateway_mock ? { GATEWAY_MOCK = "true" } : {}
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -36,38 +41,10 @@ module "lambda_workers" {
   tags        = local.common_tags
 
   functions = {
-    "action-edd" = {
-      zip_path    = "${var.dist_dir}/action-edd.zip"
-      role_arn    = module.iam.lambda_basic_role_arn
-      environment = { LOG_LEVEL = var.log_level }
-      timeout     = var.lambda_timeout_seconds
-      memory_size = var.lambda_memory_mb
-      description = "EDD action-group Lambda (mock backend)."
-    }
-    "action-xship-report" = {
-      zip_path    = "${var.dist_dir}/action-xship-report.zip"
-      role_arn    = module.iam.lambda_basic_role_arn
-      environment = { LOG_LEVEL = var.log_level }
-      timeout     = var.lambda_timeout_seconds
-      memory_size = var.lambda_memory_mb
-      description = "XShipReport action-group Lambda (mock backend)."
-    }
-    "action-xship-download" = {
-      zip_path    = "${var.dist_dir}/action-xship-download.zip"
-      role_arn    = module.iam.lambda_basic_role_arn
-      environment = { LOG_LEVEL = var.log_level }
-      timeout     = var.lambda_timeout_seconds
-      memory_size = var.lambda_memory_mb
-      description = "XShipDownload action-group Lambda (mock backend)."
-    }
-    "action-relationship" = {
-      zip_path    = "${var.dist_dir}/action-relationship.zip"
-      role_arn    = module.iam.lambda_basic_role_arn
-      environment = { LOG_LEVEL = var.log_level }
-      timeout     = var.lambda_timeout_seconds
-      memory_size = var.lambda_memory_mb
-      description = "Relationship action-group Lambda (mock backend)."
-    }
+    # Fedline's former per-domain action Lambdas (action-edd / action-xship-report /
+    # action-xship-download / action-relationship) are retired. Fedline is now a runtime-registered
+    # Agentic API Gateway backend served by the generic proxy (action-gateway); its rich mock data
+    # comes from mock/data.ts via the proxy's mock adapter. Remaining action groups: db, kb, gateway.
     "action-db" = {
       zip_path               = "${var.dist_dir}/action-db.zip"
       role_arn               = module.iam.lambda_db_role_arn
@@ -90,6 +67,31 @@ module "lambda_workers" {
       timeout                = var.lambda_timeout_seconds
       memory_size            = var.lambda_memory_mb
       description            = "KB action-group Lambda: RAG answer over pgvector (Bedrock embeddings) or in-code corpus."
+    }
+    # ── Agentic API Gateway collaborator action group: retrieve candidate backends from the pgvector
+    #    registry (Bedrock embeddings) + invoke the chosen one via the generic HTTP proxy. In-VPC +
+    #    DB role for retrieval; outbound proxy calls reach only VPC-reachable targets (no NAT today). ──
+    "action-gateway" = {
+      zip_path               = "${var.dist_dir}/action-gateway.zip"
+      role_arn               = module.iam.lambda_db_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env, local.gateway_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = var.lambda_timeout_seconds
+      memory_size            = var.lambda_memory_mb
+      description            = "Gateway action-group Lambda: retrieve registered backends (pgvector) + invoke via the generic HTTP proxy."
+    }
+    # ── Gateway registration admin: register/list/remove backends by OpenAPI spec (direct-invoke or
+    #    S3-triggered). Embeds operations + upserts into the pgvector registry. Needs DB + Bedrock. ──
+    "gateway-register" = {
+      zip_path               = "${var.dist_dir}/gateway-register.zip"
+      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = 120
+      memory_size            = 512
+      description            = "Register/list/remove Agentic API Gateway backends by OpenAPI spec (pgvector registry)."
     }
     # ── KB ingestion: S3-triggered chunk→embed→upsert into pgvector. Only functional with the DB. ──
     "ingest-kb" = {
@@ -224,6 +226,8 @@ module "lambda_entrypoint" {
         # Bound the synchronous flow wait so a slow agent dispatch falls back to local within
         # API Gateway's 30s cap. Raise/lower per environment; the agent path still runs server-side.
         FLOW_TIMEOUT_MS = "24000"
+        # Gateway action Lambda invoked directly for file-upload submits (SCP EASy files, etc.).
+        GATEWAY_FN = module.lambda_workers.function_names["action-gateway"]
       }
       timeout     = 60
       memory_size = var.lambda_memory_mb

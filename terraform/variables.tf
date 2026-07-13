@@ -67,3 +67,14 @@ variable "enable_database" {
   type        = bool
   default     = false
 }
+
+variable "gateway_mock" {
+  description = <<-EOT
+    Make the Agentic API Gateway generic proxy return deterministic synthetic responses instead of
+    making real outbound HTTP calls (sets GATEWAY_MOCK=true on the gateway action Lambda). Useful
+    before real backends are reachable from the DB VPC (the private subnets have no NAT). Set false to
+    have the proxy actually call registered applications (targets must be VPC-reachable or behind a NAT).
+  EOT
+  type        = bool
+  default     = true
+}

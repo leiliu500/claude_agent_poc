@@ -59,9 +59,12 @@ function coerceTasks(raw: unknown, fallbackType: AgentType): TaskRequest[] {
     const useCase = typeof o.useCase === "string" ? o.useCase : undefined;
     if (!useCase) continue;
     const spec = getUseCase(useCase);
-    if (!spec) continue;
+    // Gateway tasks are data-driven: the useCase is a registered backend operationId, not a static
+    // USE_CASE. Accept them by their declared type "Gateway" (with backendId carried in params).
+    const type = spec ? spec.type : isAgentType(o.type) && o.type === "Gateway" ? "Gateway" : undefined;
+    if (!type) continue;
     out.push({
-      type: spec.type,
+      type,
       useCase,
       params: (o.params && typeof o.params === "object" ? (o.params as Record<string, unknown>) : {}),
     });
@@ -77,10 +80,13 @@ function coerceResults(raw: unknown): DispatchResult[] {
     if (!item || typeof item !== "object") continue;
     const o = item as Record<string, unknown>;
     const useCase = typeof o.useCase === "string" ? o.useCase : undefined;
-    const spec = useCase ? getUseCase(useCase) : undefined;
-    if (!useCase || !spec) continue;
+    if (!useCase) continue;
+    const spec = getUseCase(useCase);
+    // Gateway results carry a backend operationId (not a static USE_CASE) — accept by declared type.
+    const type = spec ? spec.type : isAgentType(o.type) && o.type === "Gateway" ? "Gateway" : undefined;
+    if (!type) continue;
     out.push({
-      type: spec.type,
+      type,
       useCase,
       status: o.status === "error" ? "error" : "ok",
       data: Array.isArray(o.data) ? (o.data as Record<string, unknown>[]) : [],

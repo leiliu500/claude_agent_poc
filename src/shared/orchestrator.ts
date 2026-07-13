@@ -21,10 +21,19 @@ import { route } from "./router.js";
 import { executeTask } from "./dispatch.js";
 import { extractUserName, lookupUserIdentifiers } from "./user-directory.js";
 import { recallLatestReport, recallReport, rememberReport } from "./report-memory.js";
+import { retrieveOperations } from "./gateway/registry.js";
 import { ValidationError } from "./errors.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger({ mod: "orchestrator" });
+
+/**
+ * Below this static-routing confidence the question doesn't map cleanly to a fixed report use case,
+ * so we consult the Agentic API Gateway registry: a runtime-registered backend may serve it. This is
+ * the deterministic mirror of the supervisor delegating an out-of-domain request to the Gateway
+ * collaborator. With no backends registered, retrieval returns nothing and static routing stands.
+ */
+const GATEWAY_STATIC_CONF_FLOOR = 0.5;
 
 export interface OrchestrationResult {
   type: AgentType;
@@ -248,6 +257,25 @@ async function resolveIdentity(
 }
 
 /**
+ * Consult the gateway registry for a question and, if a backend operation matches, invoke it through
+ * the generic proxy. Returns the gateway DispatchResult, or undefined when nothing is registered/
+ * matches (so the caller falls through to static report routing). Best-effort: never throws.
+ */
+async function tryGateway(question: string, identifiers: Record<string, string>): Promise<{ results: DispatchResult[] } | undefined> {
+  try {
+    const matches = await retrieveOperations(question, 1);
+    const top = matches[0];
+    if (!top) return undefined;
+    const params: TaskParams = { ...identifiers, backendId: top.backendId, operationId: top.operation.operationId };
+    const result = await executeTask({ type: "Gateway", useCase: top.operation.operationId, params });
+    return { results: [result] };
+  } catch (err) {
+    log.warn("gateway fallback failed; continuing with static routing", { error: String(err) });
+    return undefined;
+  }
+}
+
+/**
  * Run the full supervisor-equivalent pipeline for a question. When `auth` is provided (an
  * authenticated request), the caller's identity + identifiers come from the verified token;
  * otherwise identity is parsed from the question text (legacy/test path).
@@ -256,6 +284,18 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   const { userId, userName, identifiers } = await resolveIdentity(question, auth);
 
   const decision = route(question);
+
+  // Agentic API Gateway fallback: when the question doesn't map cleanly to a fixed report type, a
+  // runtime-registered backend may serve it. Merge the caller's identifiers so the proxy can fill
+  // path/query params from the user's profile, exactly as the report collaborators do.
+  if (decision.confidence < GATEWAY_STATIC_CONF_FLOOR) {
+    const gw = await tryGateway(question, identifiers);
+    if (gw) {
+      log.info("orchestrating (gateway)", { userName, backendId: gw.results[0]?.meta?.backendId, useCase: gw.results[0]?.useCase });
+      return { type: "Gateway", userName, results: gw.results };
+    }
+  }
+
   const tasks: TaskRequest[] = decision.tasks.map((t) => ({
     ...t,
     params: mergeParams(identifiers, t.params),

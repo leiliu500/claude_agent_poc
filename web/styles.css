@@ -232,11 +232,37 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
 /* ---------- Composer ---------- */
 .composer { border-top: 1px solid var(--border); padding: 14px 20px 16px; background: var(--bg); }
 .composer-form {
-  max-width: 780px; margin: 0 auto; display: flex; align-items: flex-end; gap: 10px;
+  max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px;
   border: 1px solid var(--border); border-radius: 16px; padding: 8px 8px 8px 16px;
   background: var(--bg); box-shadow: var(--shadow);
 }
 .composer-form:focus-within { border-color: var(--accent); }
+.composer-row { display: flex; align-items: flex-end; gap: 10px; }
+
+/* Attachment bar (file upload for gateway ops, e.g. SCP EASy files) */
+.attach-bar { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 2px; }
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
+  background: var(--panel, rgba(127,127,127,.12)); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 6px 4px 12px; font-size: 13px; color: var(--text);
+}
+.attach-name { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-remove {
+  border: none; background: transparent; color: var(--text-soft); cursor: pointer;
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px;
+}
+.attach-remove:hover { background: rgba(127,127,127,.2); color: var(--text); }
+.payload-input {
+  width: 100%; box-sizing: border-box; border: 1px solid var(--border); border-radius: 10px;
+  background: transparent; color: var(--text); font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 8px 10px; resize: vertical; max-height: 160px;
+}
+.attach-btn {
+  flex-shrink: 0; width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-soft); display: grid; place-items: center; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.attach-btn:hover { background: rgba(127,127,127,.12); color: var(--text); }
 .composer-input {
   flex: 1; border: none; outline: none; resize: none; background: transparent;
   color: var(--text); font-size: 15px; line-height: 1.5; max-height: 200px; padding: 6px 0;

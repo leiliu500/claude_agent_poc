@@ -12,7 +12,7 @@
  * running a report. It rides the same supervisor→flow→FinalReport pipeline, surfacing its
  * grounded answer as the report summary and its citations as the section rows.
  */
-export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship" | "KB";
+export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship" | "KB" | "Gateway";
 
 export const AGENT_TYPES: readonly AgentType[] = [
   "EDD",
@@ -20,6 +20,10 @@ export const AGENT_TYPES: readonly AgentType[] = [
   "XShipDownload",
   "Relationship",
   "KB",
+  // Gateway: the Agentic API Gateway domain — routes to any application registered at runtime by its
+  // OpenAPI spec, invoked through a generic HTTP proxy (see src/shared/gateway/*). Unlike the report
+  // domains it owns no static USE_CASES: its "use case" is a registered backend operationId.
+  "Gateway",
 ] as const;
 
 /** A specific task within a type (canonical, camelCase identifiers). */
@@ -72,6 +76,12 @@ export interface TaskParams {
   query?: string;
   /** Max passages to retrieve (defaults applied downstream). */
   topK?: number;
+
+  // Gateway (Agentic API Gateway) params.
+  /** Registered backend id the gateway proxy should invoke (the target application). */
+  backendId?: string;
+  /** The backend operationId to invoke (mirrors an OpenAPI operationId). */
+  operationId?: string;
 
   [key: string]: unknown;
 }
@@ -168,10 +178,20 @@ export interface ReportSection {
   meta: Record<string, unknown>;
 }
 
+/** A file attached to an /v1/ask request (inline base64), for gateway file-upload operations (e.g. SCP). */
+export interface AskFile {
+  name: string;
+  contentBase64: string;
+}
+
 /** API request body for POST /v1/ask. */
 export interface AskRequest {
   question: string;
   sessionId?: string;
+  /** Optional attached file — routes the request to a gateway file-upload operation, bypassing the LLM. */
+  file?: AskFile;
+  /** Optional JSON control block (string) paired with the file (e.g. SCP's payload). */
+  payload?: string;
 }
 
 /** API response body. */

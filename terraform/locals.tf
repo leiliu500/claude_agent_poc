@@ -14,36 +14,12 @@ locals {
     "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:inference-profile/*",
   ]
 
-  # The four collaborator agents, fed from the committed prompts + OpenAPI schemas.
+  # Collaborator agents. The former per-domain Fedline collaborators (EDD, XShipReport,
+  # XShipDownload, Relationship) have been RETIRED: Fedline is now a runtime-registered backend of the
+  # Agentic API Gateway (see src/shared/gateway/seed.ts), reached through the single Gateway
+  # collaborator — the same way SCP and any future app are, with no per-app prompt/schema/Lambda. What
+  # remains here are the cross-cutting collaborators: DBAgent (identity), KB (RAG) and Gateway.
   collaborators = {
-    edd = {
-      display_name              = "EDD"
-      instruction               = file("${path.module}/../src/agents/prompts/edd.txt")
-      api_schema                = file("${path.module}/openapi/edd.json")
-      lambda_arn                = module.lambda_workers.function_arns["action-edd"]
-      collaboration_instruction = "Route here for Enhanced Due-Diligence (EDD) summary/detail report requests, including exports and internal exports."
-    }
-    xshipreport = {
-      display_name              = "XShipReport"
-      instruction               = file("${path.module}/../src/agents/prompts/xship-report.txt")
-      api_schema                = file("${path.module}/openapi/xship-report.json")
-      lambda_arn                = module.lambda_workers.function_arns["action-xship-report"]
-      collaboration_instruction = "Route here for XShip institution, waiver, fee (detail/summary/total) and current-quarter report requests."
-    }
-    xshipdownload = {
-      display_name              = "XShipDownload"
-      instruction               = file("${path.module}/../src/agents/prompts/xship-download.txt")
-      api_schema                = file("${path.module}/openapi/xship-download.json")
-      lambda_arn                = module.lambda_workers.function_arns["action-xship-download"]
-      collaboration_instruction = "Route here for XShip activity download requests (by ABA, ABA rollup, zone, or criteria-by-period)."
-    }
-    relationship = {
-      display_name              = "Relationship"
-      instruction               = file("${path.module}/../src/agents/prompts/relationship.txt")
-      api_schema                = file("${path.module}/openapi/relationship.json")
-      lambda_arn                = module.lambda_workers.function_arns["action-relationship"]
-      collaboration_instruction = "Route here for ABA relationship lookups from the XSHI file (ABA group or single ABA)."
-    }
     db = {
       display_name              = "DBAgent"
       instruction               = file("${path.module}/../src/agents/prompts/db.txt")
@@ -57,6 +33,13 @@ locals {
       api_schema                = file("${path.module}/openapi/kb.json")
       lambda_arn                = module.lambda_workers.function_arns["action-kb"]
       collaboration_instruction = "Route here for KNOWLEDGE, policy, procedure, definition, 'how do I' and 'what is' questions answered from the indexed document corpus (RAG). Not a report and not user-specific — no user name or identifiers are required. Call kbSearch with params.query set to the user's question."
+    }
+    gateway = {
+      display_name              = "Gateway"
+      instruction               = file("${path.module}/../src/agents/prompts/gateway.txt")
+      api_schema                = file("${path.module}/openapi/gateway.json")
+      lambda_arn                = module.lambda_workers.function_arns["action-gateway"]
+      collaboration_instruction = "Route here for requests that target an EXTERNAL / registered application and do NOT match the fixed EDD, XShipReport, XShipDownload or Relationship report types. First call gatewayRetrieve with the user's question to discover candidate backend operations, then call gatewayInvoke with the chosen backendId + operationId and the required params. This is the Agentic API Gateway to any runtime-registered app."
     }
   }
 
