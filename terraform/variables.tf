@@ -68,6 +68,36 @@ variable "enable_database" {
   default     = false
 }
 
+variable "web_ecs_vpc_id" {
+  description = "VPC for the ECS/ALB UI hosting. Default is the account's VPC with public subnets."
+  type        = string
+  default     = "vpc-0c734bef41a621668"
+}
+
+variable "web_ecs_public_subnet_ids" {
+  description = "Public subnets (>=2 AZs) for the internet-facing ALB and the Fargate tasks."
+  type        = list(string)
+  default     = ["subnet-06d8ecf82f3a0d213", "subnet-00cdc6e0a2128b460"]
+}
+
+variable "web_ecs_desired_count" {
+  description = "Number of Fargate tasks serving the UI (2 for cross-AZ HA, 1 for a demo)."
+  type        = number
+  default     = 1
+}
+
+variable "web_container_cpu" {
+  description = "Fargate task CPU units for the UI container (256 = 0.25 vCPU)."
+  type        = string
+  default     = "256"
+}
+
+variable "web_container_memory" {
+  description = "Fargate task memory (MiB) for the UI container."
+  type        = string
+  default     = "512"
+}
+
 variable "gateway_mock" {
   description = <<-EOT
     Make the Agentic API Gateway generic proxy return deterministic synthetic responses instead of

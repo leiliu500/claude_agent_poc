@@ -32,7 +32,6 @@ const LAMBDAS = [
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },
   { name: "report", entry: "src/lambdas/report/handler.ts" },
   { name: "flow-process", entry: "src/lambdas/flow-process/handler.ts" },
-  { name: "web-serve", entry: "src/lambdas/web-serve/handler.ts" },
   // One-off migration Lambda: bundles db/schema.sql (copied in below) and applies it in-VPC.
   { name: "db-migrate", entry: "src/lambdas/db-migrate/handler.ts", assets: [["db/schema.sql", "schema.sql"]] },
 ];
