@@ -77,8 +77,19 @@ export type PostDispatchMode = "passthrough" | "agents";
 export interface PostDispatchAgentSpec {
   /** What this agent does. "analytics" derives insights over the rows; "report" transforms them into prose. */
   role: "analytics" | "report";
-  /** App-specific system/instruction prompt (stored as registry metadata). */
+  /**
+   * App-specific system/instruction prompt (stored as registry metadata). This is the BASE prompt for
+   * the role — the "default dynamic agent"; a per-operation overlay (below) is appended to it at call
+   * time to specialize the agent for the exact operation that was invoked.
+   */
   prompt: string;
+  /**
+   * Optional per-operation prompt overlays, keyed by operationId. When the invoked operation has an
+   * entry, its text is appended to `prompt`, turning the generic role agent into an API-specific one
+   * (e.g. an EDD-summary analytics agent). Operations with no entry fall back to `prompt` plus the
+   * operation's own OpenAPI summary/description (a free baseline). Stored as registry metadata.
+   */
+  overlays?: Record<string, string>;
   /** Optional model id override (else POSTDISPATCH_MODEL / FOUNDATION_MODEL). */
   model?: string;
 }

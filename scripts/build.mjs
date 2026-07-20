@@ -58,6 +58,9 @@ for (const lambda of LAMBDAS) {
     sourcemap: true,
     minify: true,
     external: EXTERNAL,
+    // Inline `.md` imports as raw strings at build time (Fedline post-dispatch prompts live in
+    // Markdown). No runtime file reads / asset copying — the prompt text ships inside index.js.
+    loader: { ".md": "text" },
     logLevel: "info",
   });
   // Mark the bundle as CommonJS explicitly. The repo's root package.json is `type:module`,

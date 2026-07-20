@@ -13,6 +13,7 @@ import { seedBuiltinBackends } from "../shared/gateway/seed.js";
 import { runAnalytics } from "../shared/analytics.js";
 import { generateReport } from "../shared/report.js";
 import { runPostDispatch } from "../shared/postdispatch/pipeline.js";
+import { runDynamicAgent } from "../shared/postdispatch/agent.js";
 import type { DispatchResult } from "../shared/types.js";
 
 // Stub the ephemeral-agent module: analytics agent returns a JSON insight array, report agent a summary.
@@ -52,6 +53,7 @@ function scpResult(): DispatchResult {
 
 beforeEach(async () => {
   clearRegistryForTests();
+  vi.clearAllMocks(); // reset ephemeral-agent call history (keeps the mocked implementation)
   // Default: hermetic mock mode → agents disabled → deterministic fallback.
   process.env.GATEWAY_MOCK = "true";
   delete process.env.POSTDISPATCH_AGENTS;
@@ -65,6 +67,18 @@ describe("post-dispatch policy is registry metadata", () => {
     expect(fedline?.postDispatch?.mode).toBe("agents");
     expect(fedline?.postDispatch?.agents?.map((a) => a.role)).toEqual(["analytics", "report"]);
     expect(scp?.postDispatch?.mode).toBe("passthrough");
+  });
+
+  it("carries per-operation overlays for both agents (API-specific specialization)", async () => {
+    const fedline = await getBackend("fedline");
+    const [analytics, report] = fedline?.postDispatch?.agents ?? [];
+    // Operation-specific override present…
+    expect(analytics?.overlays?.eddSummaryReport).toContain("EDD SUMMARY");
+    // …and a family overlay covers operations without a specific override.
+    expect(analytics?.overlays?.xShipInstitution).toContain("XShip");
+    expect(report?.overlays?.xshiFileAba).toContain("relationship");
+    // SCP is passthrough — no agents, hence no overlays.
+    expect((await getBackend("scp"))?.postDispatch?.agents).toBeUndefined();
   });
 });
 
@@ -109,6 +123,46 @@ describe("runPostDispatch divergence", () => {
     expect(out?.insights).toHaveLength(2);
     expect(out?.insights[0]).toContain("350");
     expect(out?.summary).toContain("warrants review");
+  });
+
+  it("composes the invoked operation's overlay onto the base prompt of BOTH agents", async () => {
+    process.env.GATEWAY_MOCK = "false"; // enable the (mocked) agents
+    const results = [fedlineResult()]; // useCase eddSummaryReport
+    await runPostDispatch({ question: "edd summary", results, analytics: runAnalytics(results) });
+
+    const calls = vi.mocked(runDynamicAgent).mock.calls;
+    const analyticsPrompt = calls.find((c) => c[0].role === "analytics")?.[0].prompt ?? "";
+    const reportPrompt = calls.find((c) => c[0].role === "report")?.[0].prompt ?? "";
+
+    // Base role scaffolding is still there…
+    expect(analyticsPrompt).toContain("analytics agent");
+    expect(reportPrompt).toContain("report agent");
+    // …with the eddSummaryReport operation overlay appended (API-specific specialization).
+    expect(analyticsPrompt).toContain("EDD SUMMARY");
+    // eddSummaryReport has no report-specific override → falls back to the EDD family report overlay.
+    expect(reportPrompt).toContain("BSA/AML compliance reviewer");
+  });
+
+  it("falls back to the operation's own summary/description when no overlay is authored", async () => {
+    process.env.GATEWAY_MOCK = "false";
+    // A backend whose operation has NO authored overlay: the auto-overlay uses its summary/description.
+    const { registerBackend } = await import("../shared/gateway/registry.js");
+    await registerBackend({
+      backendId: "acme",
+      name: "Acme",
+      baseUrl: "https://acme.pvt",
+      operations: [
+        { operationId: "listWidgets", method: "GET", path: "/widgets", summary: "List all widgets", description: "Paginated widget catalog", params: [], keywords: ["widgets"] },
+      ],
+      postDispatch: { mode: "agents", agents: [{ role: "analytics", prompt: "You are the analytics agent." }] },
+    });
+    const results: DispatchResult[] = [
+      { type: "Gateway", useCase: "listWidgets", status: "ok", data: [{ id: 1 }], meta: { backendId: "acme", operationId: "listWidgets" }, latencyMs: 1 },
+    ];
+    await runPostDispatch({ question: "widgets", results, analytics: runAnalytics(results) });
+    const prompt = vi.mocked(runDynamicAgent).mock.calls.find((c) => c[0].role === "analytics")?.[0].prompt ?? "";
+    expect(prompt).toContain("List all widgets");
+    expect(prompt).toContain("Paginated widget catalog");
   });
 
   it("folds the agent output into the report (summary override + insights on the first section)", async () => {

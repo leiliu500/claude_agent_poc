@@ -1,7 +1,7 @@
 /**
  * Tolerant parser for the Supervisor agent's completion text.
  *
- * The supervisor is instructed (src/agents/prompts/supervisor.txt) to end its reply with a
+ * The supervisor is instructed (src/agents/prompts/supervisor.md) to end its reply with a
  * single JSON object:
  *   { "type": AgentType, "tasks": TaskRequest[], "dispatchResults": DispatchResult[] }
  *
