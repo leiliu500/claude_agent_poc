@@ -18,6 +18,7 @@ import { USE_CASES } from "../usecases.js";
 import { registerBackend } from "./registry.js";
 import { pathParamNames } from "./openapi.js";
 import { POSTDISPATCH_PROMPTS } from "../../apps/fedline/prompts/postdispatch_prompts.js";
+import { fedlineOverlays } from "../../apps/fedline/prompts/operation_prompts.js";
 import type { BackendOperation, BackendParam, PostDispatchPolicy, RegisterBackendInput } from "./types.js";
 
 const FEDLINE_BASE_URL = process.env.FEDLINE_BASE_URL ?? "https://fedline.frb.pvt";
@@ -30,13 +31,19 @@ const SCP_BASE_URL = process.env.SCP_BASE_URL ?? "https://dg2-scp.dev.fedcash-if
  * built at call time from Fedline's application-specific prompts (see apps/fedline/prompts/postdispatch_prompts.ts),
  * run once, and discarded (see shared/postdispatch/*). SCP, by contrast, gets no policy at all →
  * passthrough (its plain-text ack is surfaced as-is).
+ *
+ * Each agent additionally carries per-OPERATION overlays (apps/fedline/prompts/operation_prompts.ts):
+ * at call time the overlay for the exact invoked operation (e.g. eddSummaryReport) is appended to the
+ * base role prompt, so the generic analytics/report agent specializes into an API-specific agent for
+ * that one dispatch — then stops. Operations without an overlay fall back to the base prompt plus the
+ * operation's own summary/description (see shared/postdispatch/pipeline.ts).
  */
 export function fedlinePostDispatch(): PostDispatchPolicy {
   return {
     mode: "agents",
     agents: [
-      { role: "analytics", prompt: POSTDISPATCH_PROMPTS.analytics },
-      { role: "report", prompt: POSTDISPATCH_PROMPTS.report },
+      { role: "analytics", prompt: POSTDISPATCH_PROMPTS.analytics, overlays: fedlineOverlays("analytics") },
+      { role: "report", prompt: POSTDISPATCH_PROMPTS.report, overlays: fedlineOverlays("report") },
     ],
   };
 }

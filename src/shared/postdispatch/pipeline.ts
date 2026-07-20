@@ -18,7 +18,7 @@ import type { AnalyticsResult, DispatchResult } from "../types.js";
 import { createLogger } from "../logger.js";
 import { getBackend } from "../gateway/registry.js";
 import { postDispatchModelConfigured, runDynamicAgent } from "./agent.js";
-import type { PostDispatchAgentSpec, PostDispatchPolicy } from "../gateway/types.js";
+import type { BackendOperation, PostDispatchAgentSpec, PostDispatchPolicy } from "../gateway/types.js";
 
 const log = createLogger({ mod: "postdispatch-pipeline" });
 
@@ -96,26 +96,55 @@ function parseInsights(raw: string): string[] {
     .slice(0, 8);
 }
 
+/** The invoked operation's id — prefer the proxy-stamped meta, fall back to the result's useCase. */
+function operationIdOf(gw: DispatchResult): string {
+  return String(gw.meta?.operationId ?? gw.useCase ?? "");
+}
+
+/** Baseline API tailoring for an operation with no authored overlay: its own OpenAPI summary/description. */
+function autoOverlay(op?: BackendOperation): string | undefined {
+  if (!op) return undefined;
+  const text = [op.summary, op.description].filter(Boolean).join(" — ");
+  return text ? `OPERATION — ${text}` : undefined;
+}
+
+/**
+ * Compose the effective system prompt for one ephemeral agent: the base role prompt plus the overlay
+ * for the exact operation that was invoked. An authored per-operation overlay wins; otherwise the
+ * operation's own summary/description provides a free baseline; otherwise the base prompt stands alone.
+ * This is what turns the generic analytics/report agent into an API-specific one for a single call.
+ */
+function composePrompt(spec: PostDispatchAgentSpec, operationId: string, op?: BackendOperation): string {
+  const overlay = spec.overlays?.[operationId] ?? autoOverlay(op);
+  return overlay ? `${spec.prompt}\n\n${overlay}` : spec.prompt;
+}
+
 async function runAgents(
   agents: PostDispatchAgentSpec[],
   input: PostDispatchInput,
   gw: DispatchResult,
+  op?: BackendOperation,
 ): Promise<PostDispatchOutput> {
   const backendId = String(gw.meta.backendId);
+  const operationId = operationIdOf(gw);
   const analyticsSpec = agents.find((a) => a.role === "analytics");
   const reportSpec = agents.find((a) => a.role === "report");
 
-  // 1) Ephemeral analytics agent: derive insights over the rows + trusted rollups.
+  // 1) Ephemeral analytics agent: derive insights over the rows + trusted rollups. The base prompt is
+  //    specialized to the invoked operation (per-operation overlay) for the length of this one call.
   let insights: string[] = [];
   if (analyticsSpec) {
-    const raw = await runDynamicAgent(analyticsSpec, buildContext(input, gw));
+    const spec = { ...analyticsSpec, prompt: composePrompt(analyticsSpec, operationId, op) };
+    const raw = await runDynamicAgent(spec, buildContext(input, gw));
     insights = parseInsights(raw);
   }
 
-  // 2) Ephemeral report agent: transform the insights + aggregates into an executive summary.
+  // 2) Ephemeral report agent: transform the insights + aggregates into an executive summary — also
+  //    specialized to the invoked operation.
   let summary: string | undefined;
   if (reportSpec) {
-    summary = (await runDynamicAgent(reportSpec, buildContext(input, gw, insights))).trim() || undefined;
+    const spec = { ...reportSpec, prompt: composePrompt(reportSpec, operationId, op) };
+    summary = (await runDynamicAgent(spec, buildContext(input, gw, insights))).trim() || undefined;
   }
 
   return { summary, insights, backendId };
@@ -149,8 +178,12 @@ export async function runPostDispatch(input: PostDispatchInput): Promise<PostDis
 
   const backendId = String(gw.meta.backendId);
   let policy: PostDispatchPolicy | undefined;
+  let op: BackendOperation | undefined;
   try {
-    policy = (await getBackend(backendId))?.postDispatch;
+    const backend = await getBackend(backendId);
+    policy = backend?.postDispatch;
+    // The invoked operation drives per-operation prompt specialization (and the auto-overlay fallback).
+    op = backend?.operations.find((o) => o.operationId === operationIdOf(gw));
   } catch (err) {
     log.warn("could not load backend policy; deterministic fallback", { backendId, error: String(err) });
     return undefined;
@@ -163,7 +196,7 @@ export async function runPostDispatch(input: PostDispatchInput): Promise<PostDis
   }
 
   try {
-    const out = await withBudget(runAgents(policy.agents, input, gw), BUDGET_MS);
+    const out = await withBudget(runAgents(policy.agents, input, gw, op), BUDGET_MS);
     log.info("post-dispatch agents completed", { backendId, insights: out.insights.length, hasSummary: Boolean(out.summary) });
     return out;
   } catch (err) {

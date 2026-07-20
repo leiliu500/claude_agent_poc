@@ -189,7 +189,7 @@ module "bedrock_agents" {
   name_prefix            = local.name_prefix
   foundation_model       = var.foundation_model
   agent_role_arn         = module.iam.bedrock_agent_role_arn
-  supervisor_instruction = file("${path.module}/../src/agents/prompts/supervisor.txt")
+  supervisor_instruction = file("${path.module}/../src/agents/prompts/supervisor.md")
   collaborators          = local.collaborators
   tags                   = local.common_tags
 }
