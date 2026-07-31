@@ -17,6 +17,7 @@ const TITLES: Record<AgentType, string> = {
   XShipReport: "XShip Reporting",
   XShipDownload: "XShip Activity Download",
   Relationship: "ABA Relationship Report",
+  Report: "CT Deposit Report",
   KB: "Knowledge Base Answer",
   Gateway: "Agentic API Gateway Response",
 };
@@ -33,6 +34,34 @@ function columnsOf(rows: Record<string, unknown>[]): string[] {
   const cols = new Set<string>();
   for (const row of rows) for (const k of Object.keys(row)) cols.add(k);
   return [...cols];
+}
+
+/** "$206,000" — integer USD with thousands separators (deterministic; no locale side effects). */
+function formatUsd(n: number): string {
+  return "$" + Math.round(n).toLocaleString("en-US");
+}
+
+/**
+ * CT deposit reports answer "how much was deposited", so lead with the aggregated total instead of
+ * making the reader sum the line items. Built from the deterministic rollup the mock/backend surfaces
+ * (`meta.totalDepositAmount`); returns undefined for any non-CT section so other report types are
+ * unaffected. The line-item detail table is kept — this is a headline above it.
+ */
+function ctDepositSummaryLine(section: ReportSection): string | undefined {
+  const meta = section.meta || {};
+  const total = meta.totalDepositAmount;
+  if (typeof total !== "number") return undefined;
+  const count = typeof meta.reportTotalCount === "number" ? meta.reportTotalCount : section.rows.length;
+  const inst = typeof meta.depositoryInstitution === "string" ? meta.depositoryInstitution : undefined;
+  const site = meta.siteId != null && meta.siteId !== "" ? String(meta.siteId) : undefined;
+  const start = typeof meta.startDate === "string" ? meta.startDate : undefined;
+  const end = typeof meta.endDate === "string" ? meta.endDate : undefined;
+  const when = start && end ? (start === end ? `on ${start}` : `from ${start} to ${end}`) : "";
+  const ctx = [inst, site ? `site ${site}` : undefined].filter(Boolean).join(", ");
+  let line = `Total deposited: ${formatUsd(total)} across ${count} deposit${count === 1 ? "" : "s"}`;
+  if (ctx) line += ` — ${ctx}`;
+  if (when) line += ` ${when}`;
+  return line + ".";
 }
 
 export interface ReportInput {
@@ -77,6 +106,13 @@ export function generateReport(input: ReportInput): FinalReport {
     sections[0] = { ...sections[0], highlights: [...input.agentInsights, ...sections[0].highlights] };
   }
 
+  // CT deposit reports: lead with the aggregated total (a headline above the retained line-item table).
+  const ctIdx = sections.findIndex((s) => s.useCase === "ctDepositsSummary");
+  const ctLine = ctIdx >= 0 && sections[ctIdx] ? ctDepositSummaryLine(sections[ctIdx]!) : undefined;
+  if (ctLine && sections[ctIdx]) {
+    sections[ctIdx] = { ...sections[ctIdx]!, highlights: [ctLine, ...sections[ctIdx]!.highlights] };
+  }
+
   // A post-dispatch report agent's summary wins outright. Otherwise: KB answers surface the grounded
   // answer; a Gateway text response (e.g. SCP's ack) surfaces the response body; everything else gets
   // the "N of M tasks succeeded" line.
@@ -86,7 +122,7 @@ export function generateReport(input: ReportInput): FinalReport {
       ? buildKbSummary(dispatchResults)
       : type === "Gateway"
         ? gatewayResponseText(dispatchResults) ?? buildSummary(type, analytics)
-        : buildSummary(type, analytics));
+        : ctLine ?? buildSummary(type, analytics));
 
   return {
     reportId: reportId(question, type),

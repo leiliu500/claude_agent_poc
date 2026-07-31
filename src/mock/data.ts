@@ -382,6 +382,124 @@ function relationshipRows(params: TaskParams, scope: "abaGroup" | "aba"): MockPa
   return { rows, meta: { scope, generatedRows: rows.length } };
 }
 
+// ── Report (CT deposit reporting) ──────────────────────────────────────────────────
+// Shaped after the real CTDepositsSummary REST API:
+//   /report/ct/view/CTDepositsSummary/{siteId}/{startDate}/{endDate}?pageNumber&pageSize&rnd
+// The response is a COLUMNAR report envelope: a `headers` array (columnDef → header/type) plus
+// `data.reportDataList` where each entry is `{ columns: { column0..column6 } }`. We surface a readable,
+// named projection of each deposit as the rows (so analytics can sum the Amount and the table renders
+// cleanly), and keep the faithful raw envelope — headers + column0..column6 rows — in `meta.result`.
+// Deposits are aggregated across the WHOLE requested day/range (meta.totalDepositAmount), answering
+// "how much was deposited from <institution> for <date>".
+const CT_CARRIERS = ["BRINKS-ALBUQ.", "GARDA-PHOENIX", "LOOMIS-DENVER", "BRINKS-EL PASO", "GARDA-TUCSON"];
+const CT_USERS = ["FRB Jing Liao-CTRVM CIAM", "FRB Maria Gomez-CTRVM CIAM", "FRB David Kim-CTRVM CIAM"];
+const CT_INSTITUTION = "BANK OF AMERICA, NA, MD";
+
+/** The exact column header descriptors the real CTDepositsSummary API returns (kept for fidelity). */
+const CT_HEADERS: Record<string, unknown>[] = [
+  { columnDef: "column0", header: "Carrier Name", type: "string", export: true, sortable: false, sortOrder: "asc", serverSideSortable: true, serverSideSortField: "1" },
+  { columnDef: "column1", header: "Endpoint Number", type: "string", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "2" },
+  { columnDef: "column2", header: "Depository Institution", type: "string", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "3" },
+  { columnDef: "column3", header: "Deposit ID", type: "number", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "4" },
+  { columnDef: "column4", header: "Date/Time", type: "datetime", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "5" },
+  { columnDef: "column5", header: "User Name", type: "string", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "6" },
+  { columnDef: "column6", header: "Amount", type: "currency", export: true, sortable: false, sortOrder: null, serverSideSortable: true, serverSideSortField: "7" },
+];
+
+function ctStartDate(params: TaskParams): string {
+  return (params.startDate as string) ?? "2026-07-31";
+}
+function ctEndDate(params: TaskParams): string {
+  return (params.endDate as string) ?? ctStartDate(params);
+}
+/** Whole days in an inclusive [start, end] range (min 1), so a single-day query spans exactly one day. */
+function daySpan(startDate: string, endDate: string): number {
+  const ms = Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`);
+  return Number.isFinite(ms) ? Math.max(1, Math.round(ms / 86_400_000) + 1) : 1;
+}
+
+/**
+ * CT deposit summary: armored-carrier deposits made to a site over a date range. Because the real API
+ * reports `serverSidePagination: false`, it returns the FULL result set for the range (the client
+ * paginates in-browser) — so we return every generated deposit and set reportCount === reportTotalCount.
+ */
+function ctDepositsRows(params: TaskParams): MockPayload {
+  const siteId = (params.siteId as string) ?? "3501";
+  const startDate = ctStartDate(params);
+  const endDate = ctEndDate(params);
+  const institution = CT_INSTITUTION; // the API path is site-scoped; this site's deposits are BofA's
+  const span = daySpan(startDate, endDate);
+
+  const countRnd = seeded(`ct:count:${siteId}:${startDate}:${endDate}`);
+  const count = 6 + Math.floor(countRnd() * 12); // 6..17 deposits across the range
+
+  const rows = Array.from({ length: count }, (_, i) => {
+    const r = seeded(`ct:rec:${siteId}:${startDate}:${i}`);
+    const carrier = CT_CARRIERS[i % CT_CARRIERS.length]!;
+    const endpointNumber = `0520-0163-3-${3500 + (i % 5)}`;
+    const depositId = 55_138_500 + Math.floor(r() * 99_999);
+    const dateStr = addDays(startDate, i % span);
+    const hh = String(8 + Math.floor(r() * 10)).padStart(2, "0");
+    const mm = String(Math.floor(r() * 60)).padStart(2, "0");
+    const ss = String(Math.floor(r() * 60)).padStart(2, "0");
+    const ms = String(Math.floor(r() * 1000)).padStart(3, "0");
+    const amount = 1000 * (1 + Math.floor(r() * 50)); // round-thousand currency, 1,000..50,000
+    return {
+      carrierName: carrier,
+      endpointNumber,
+      depositoryInstitution: institution,
+      depositId,
+      dateTime: `${dateStr} ${hh}:${mm}:${ss}.${ms} MT`,
+      userName: CT_USERS[i % CT_USERS.length]!,
+      amount,
+    };
+  });
+
+  const totalDepositAmount = rows.reduce((sum, row) => sum + Number(row.amount), 0);
+  // Faithful raw envelope: each deposit re-projected into the column0..column6 form the API returns.
+  const reportDataList = rows.map((row) => ({
+    columns: {
+      column0: row.carrierName,
+      column1: row.endpointNumber,
+      column2: row.depositoryInstitution,
+      column3: row.depositId,
+      column4: row.dateTime,
+      column5: row.userName,
+      column6: row.amount,
+    },
+  }));
+
+  return {
+    rows,
+    meta: {
+      title: "CT Deposit Summary",
+      siteId,
+      startDate,
+      endDate,
+      depositoryInstitution: institution,
+      reportCount: rows.length,
+      reportTotalCount: rows.length,
+      // Day-level aggregation: the total deposited across the whole requested range.
+      totalDepositAmount,
+      pageNumber: Number(params.pageNumber ?? 1),
+      pageSize: Number(params.pageSize ?? 25),
+      generatedRows: rows.length,
+      // Faithful raw API envelope for anyone inspecting the simulated response.
+      result: {
+        headers: CT_HEADERS,
+        data: { reportDataList },
+        headingHeaders: [],
+        headingData: null,
+        title: "CT Deposit Summary",
+        reportCount: rows.length,
+        reportTotalCount: rows.length,
+        serverSidePagination: false,
+        exportHeaders: [],
+      },
+    },
+  };
+}
+
 // ── SCP (FedCash interface simulator — gateway backend) ────────────────────────────
 // SCP's submitEasySim returns a plain-text acknowledgement echoing the control block's inputData and
 // a fresh Request ID (also sent as the X-Request-ID header). This mock mirrors that exact shape so a
@@ -443,6 +561,8 @@ export const MOCK_GENERATORS: Record<string, (p: TaskParams) => MockPayload> = {
   // Relationship
   xshiFileAbaGroup: (p) => relationshipRows(p, "abaGroup"),
   xshiFileAba: (p) => relationshipRows(p, "aba"),
+  // Report (CT deposit reporting)
+  ctDepositsSummary: (p) => ctDepositsRows(p),
   // SCP (gateway backend)
   submitEasySim: (p) => scpSubmitEasy(p),
 };

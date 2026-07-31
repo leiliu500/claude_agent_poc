@@ -29,6 +29,7 @@ import eddMd from "./postdispatch/EDD.md";
 import xShipReportMd from "./postdispatch/XShipReport.md";
 import xShipDownloadMd from "./postdispatch/XShipDownload.md";
 import relationshipMd from "./postdispatch/Relationship.md";
+import reportMd from "./postdispatch/Report.md";
 import eddSummaryReportMd from "./postdispatch/eddSummaryReport.md";
 import eddDetailReportMd from "./postdispatch/eddDetailReport.md";
 
@@ -41,6 +42,7 @@ const FAMILY_OVERLAYS: Partial<Record<AgentType, RolePrompts>> = {
   XShipReport: parseRolePrompts(xShipReportMd),
   XShipDownload: parseRolePrompts(xShipDownloadMd),
   Relationship: parseRolePrompts(relationshipMd),
+  Report: parseRolePrompts(reportMd),
 };
 
 // ── Operation-specific overrides — where one API diverges from its family ─────────────────────────

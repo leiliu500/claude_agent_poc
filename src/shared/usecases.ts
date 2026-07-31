@@ -96,6 +96,10 @@ const XS_EXPORT_ABA = mk("aba", "string", "Target ABA appended on the export pat
 const REQUEST_ID = mk("requestId", "string", "Prepared activity-download request identifier (path segment).", true);
 const CRITERIA = mk("criteria", "string", "Encoded activity criteria token (path segment).", true);
 
+// ── Report (CT deposit) path/query params ─────────────────────────────────────
+const SITE_ID = mk("siteId", "string", "Endpoint/site identifier the deposits were made to (path segment).", true);
+const RND = mk("rnd", "string", "Cache-busting nonce (query); ignored by the data, kept for URL fidelity.");
+
 export const USE_CASES: readonly UseCaseSpec[] = [
   // ── EDD ────────────────────────────────────────────────────────────────────
   {
@@ -282,6 +286,28 @@ export const USE_CASES: readonly UseCaseSpec[] = [
     exportable: true,
     params: [CRITERIA],
     endpoint: { method: "GET", path: "/xshipdownload/activity/criteria/{criteria}" },
+  },
+
+  // ── Report (CT deposit reporting) ─────────────────────────────────────────────
+  {
+    id: "ctDepositsSummary",
+    type: "Report",
+    label: "CT Deposit Summary",
+    description:
+      "Cash-transportation deposit summary: armored-carrier currency/coin deposits made to a site " +
+      "(endpoint) over a date range, listing carrier, endpoint, depository institution, deposit id, " +
+      "date/time, user and amount. Answers 'how much was deposited' for a site over a day/period.",
+    keywords: [
+      "deposit", "deposits", "ct deposit", "ct deposits", "cash transportation", "carrier", "armored",
+      "depository", "depository institution", "deposited", "how much deposit", "ct deposit summary",
+    ],
+    exportable: false,
+    params: [SITE_ID, START_DATE, END_DATE, PAGE_NUMBER, PAGE_SIZE, RND],
+    endpoint: {
+      method: "GET",
+      path: "/report/ct/view/CTDepositsSummary/{siteId}/{startDate}/{endDate}",
+      query: ["pageNumber", "pageSize", "rnd"],
+    },
   },
 
   // ── KB (knowledge base / RAG) ─────────────────────────────────────────────────
