@@ -13,6 +13,16 @@ function isNumeric(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+/**
+ * Identifier-like numeric columns (depositId, ncdwRecordID, adviceNumber, ticketNumber, …) are labels,
+ * not quantities: summing or averaging them is meaningless and — because their values are huge — they
+ * hijack the "largest rollup" highlight (e.g. a CT-deposit report reporting a `depositId` total instead
+ * of the deposited `amount`). Excluded from numeric rollups so the real metric (amount, fee, …) surfaces.
+ */
+function isIdentifierColumn(name: string): boolean {
+  return /(?:Id|ID|Number)$/.test(name);
+}
+
 function summariseNumeric(values: number[]): NumericSummary {
   const sum = values.reduce((a, b) => a + b, 0);
   return {
@@ -38,7 +48,7 @@ function analyseRows(rows: Record<string, unknown>[]): {
   for (const row of rows) {
     for (const [k, v] of Object.entries(row)) {
       if (isNumeric(v)) {
-        (numericCols[k] ??= []).push(v);
+        if (!isIdentifierColumn(k)) (numericCols[k] ??= []).push(v);
       } else if (typeof v === "string" || typeof v === "boolean") {
         const bucket = (catCols[k] ??= {});
         const key = String(v);

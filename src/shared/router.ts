@@ -25,10 +25,19 @@ const ABA_RE = /\b(\d{9})\b/;
 const ZONE_RE = /\bzone[ -]?([a-z0-9]+)\b/i;
 const GROUP_RE = /\b(?:aba )?group[ -]?([a-z0-9]+)\b/i;
 const ISO_DATE_RE = /\b(20\d{2}-\d{2}-\d{2})\b/g;
+// Natural-language dates like "July 31, 2026" / "Jul 31 2026" — used by the CT deposit report, whose
+// questions read "…for July 31, 2026" rather than an ISO string. Captured only when no ISO date is present.
+const MONTHS: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+const NL_DATE_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(20\d{2})\b/gi;
 
 // Explicitly-stated EDD request params. Each needs the literal field name followed by its value,
 // so they don't misfire on ordinary prose. Values may be alphanumeric with - or _.
 const OFFICE_RE = /\boffice(?:[_ ]?id)?\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
+// CT deposit report site identifier: "site id 3279", "site 3279", "siteId: 3279".
+const SITE_ID_RE = /\bsite(?:[_ ]?id)?\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
 const ENDPOINT_RE = /\bendpoint\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
 const DENOMINATION_RE = /\bdenomination\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
 const DIFF_TYPE_RE = /\bdifference[_ ]?type\s*[:#]?\s*([A-Za-z0-9][\w-]*)/i;
@@ -71,6 +80,16 @@ export function extractParams(question: string): TaskParams {
     params.startDate = params.startDt = dates[0];
     const end = dates[1] ?? dates[0];
     params.endDate = params.endDt = end;
+  } else {
+    // No ISO date — fall back to natural-language dates ("July 31, 2026"). A single date becomes a
+    // one-day range (start === end), so a CT deposit question aggregates that whole day.
+    const nl = [...question.matchAll(NL_DATE_RE)].map(
+      (m) => `${m[3]}-${MONTHS[m[1]!.slice(0, 3).toLowerCase()]}-${m[2]!.padStart(2, "0")}`,
+    );
+    if (nl.length) {
+      params.startDate = params.startDt = nl[0];
+      params.endDate = params.endDt = nl[1] ?? nl[0];
+    }
   }
 
   // EDD request-supplied path params stated explicitly in the prose (e.g. "office_id:001",
@@ -78,6 +97,8 @@ export function extractParams(question: string): TaskParams {
   // DBAgent's stored defaults for the same field — the user is more specific than their profile.
   const office = question.match(OFFICE_RE);
   if (office) params.officeId = office[1];
+  const site = question.match(SITE_ID_RE);
+  if (site) params.siteId = site[1];
   const endpoint = question.match(ENDPOINT_RE);
   if (endpoint) params.endpoint = endpoint[1];
   const denom = question.match(DENOMINATION_RE);

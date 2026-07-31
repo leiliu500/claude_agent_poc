@@ -12,13 +12,17 @@
  * running a report. It rides the same supervisor→flow→FinalReport pipeline, surfacing its
  * grounded answer as the report summary and its citations as the section rows.
  */
-export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship" | "KB" | "Gateway";
+export type AgentType = "EDD" | "XShipReport" | "XShipDownload" | "Relationship" | "Report" | "KB" | "Gateway";
 
 export const AGENT_TYPES: readonly AgentType[] = [
   "EDD",
   "XShipReport",
   "XShipDownload",
   "Relationship",
+  // Report: cash-transportation (CT) deposit reporting — armored-carrier deposits at an endpoint/site
+  // over a date range (e.g. CTDepositsSummary). A report domain like EDD/XShip, exposed through the
+  // Fedline gateway backend and specialized by its own post-dispatch overlay (postdispatch/Report.md).
+  "Report",
   "KB",
   // Gateway: the Agentic API Gateway domain — routes to any application registered at runtime by its
   // OpenAPI spec, invoked through a generic HTTP proxy (see src/shared/gateway/*). Unlike the report
@@ -51,6 +55,8 @@ export interface TaskParams {
   startDate?: string;
   endDate?: string;
   reportId?: string;
+  /** CT deposit report site/endpoint identifier (path segment). */
+  siteId?: string;
   pageNumber?: number;
   pageSize?: number;
   sortField?: string;
