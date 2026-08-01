@@ -68,16 +68,13 @@ variable "enable_database" {
   default     = false
 }
 
-variable "web_ecs_vpc_id" {
-  description = "VPC for the ECS/ALB UI hosting. Default is the account's VPC with public subnets."
+# The web ALB/ECS VPC is now Terraform-managed (see web-vpc.tf) instead of a hardcoded pre-existing
+# VPC id — an environment teardown deleted the old external VPC and left applies unable to recreate the
+# ALB. Only the CIDR is configurable; the VPC, IGW and public subnets are created and self-heal.
+variable "web_vpc_cidr" {
+  description = "CIDR for the Terraform-managed public VPC that hosts the web ALB + Fargate UI."
   type        = string
-  default     = "vpc-0c734bef41a621668"
-}
-
-variable "web_ecs_public_subnet_ids" {
-  description = "Public subnets (>=2 AZs) for the internet-facing ALB and the Fargate tasks."
-  type        = list(string)
-  default     = ["subnet-06d8ecf82f3a0d213", "subnet-00cdc6e0a2128b460"]
+  default     = "10.60.0.0/16"
 }
 
 variable "web_ecs_desired_count" {

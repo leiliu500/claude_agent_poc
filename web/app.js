@@ -4,14 +4,13 @@
 
   // ---------- Config (persisted in localStorage) ----------
   const DEFAULT_ENDPOINT = "https://9hixvh0jxd.execute-api.us-gov-west-1.amazonaws.com/v1/ask";
-  // When the UI is served from the API Gateway itself (hosted at /app), the API is same-origin by
-  // construction. Return that so the bundle is environment-agnostic — and, crucially, so a stale
-  // `ra.endpoint` saved by a PREVIOUS deployment (a now-dead API URL) can't break login/ask.
+  // When the UI is served by a web server (the ECS/nginx front-end OR API Gateway's /app), the API is
+  // reachable SAME-ORIGIN: the nginx container proxies /v1/* to the current API Gateway. So the browser
+  // never hardcodes a cross-origin API URL — which is what breaks after an environment teardown mints a
+  // new API Gateway id. Only a file:// (local) page falls back to a saved/baked URL. This also heals a
+  // stale `ra.endpoint` saved by a PREVIOUS deployment (a now-dead API URL).
   function hostedEndpoint() {
-    if (/\.execute-api\..*\.amazonaws\.com$/.test(location.hostname) && location.pathname.startsWith("/app")) {
-      return location.origin + "/v1/ask";
-    }
-    return null;
+    return /^https?:$/.test(location.protocol) ? location.origin + "/v1/ask" : null;
   }
   // Precedence: hosted same-origin (authoritative) > saved override (local dev) > baked-in default.
   const hosted = hostedEndpoint();

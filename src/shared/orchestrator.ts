@@ -16,8 +16,9 @@
  * deterministic fallback. The real Bedrock supervisor performs the same steps via the DBAgent and
  * collaborator agents; this is the reference implementation and the test seam.
  */
-import type { AgentType, AuthContext, DispatchResult, TaskParams, TaskRequest } from "./types.js";
+import type { AgentType, AuthContext, DispatchResult, RoutingDecision, TaskParams, TaskRequest } from "./types.js";
 import { route } from "./router.js";
+import { llmRoute } from "./llm-router.js";
 import { executeTask } from "./dispatch.js";
 import { extractUserName, lookupUserIdentifiers } from "./user-directory.js";
 import { recallLatestReport, recallReport, rememberReport } from "./report-memory.js";
@@ -283,7 +284,12 @@ async function tryGateway(question: string, identifiers: Record<string, string>)
 export async function orchestrate(question: string, auth?: AuthContext): Promise<OrchestrationResult> {
   const { userId, userName, identifiers } = await resolveIdentity(question, auth);
 
-  const decision = route(question);
+  // LLM router drives when a model is configured (and validates its pick against the catalog); the
+  // deterministic keyword router is the safety net. This is what makes routing genuinely agentic
+  // instead of always falling through to regex — every LLM miss/fallback is logged in llm-router.
+  const llm = await llmRoute(question);
+  const decision: RoutingDecision = llm ?? route(question);
+  const routedBy = llm ? "llm" : "deterministic";
 
   // Agentic API Gateway fallback: when the question doesn't map cleanly to a fixed report type, a
   // runtime-registered backend may serve it. Merge the caller's identifiers so the proxy can fill
@@ -304,6 +310,8 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   log.info("orchestrating", {
     userName,
     authenticated: Boolean(auth),
+    routedBy,
+    confidence: decision.confidence,
     type: decision.type,
     tasks: tasks.map((t) => t.useCase),
   });

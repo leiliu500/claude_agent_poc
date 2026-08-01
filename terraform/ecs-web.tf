@@ -57,7 +57,7 @@ resource "aws_iam_role_policy_attachment" "web_ecs_exec" {
 resource "aws_security_group" "web_alb" {
   name        = "${local.name_prefix}-web-alb"
   description = "Internet-facing ALB for the chat UI (HTTP)"
-  vpc_id      = var.web_ecs_vpc_id
+  vpc_id      = local.web_vpc_id
 
   ingress {
     description = "HTTP from anywhere"
@@ -78,7 +78,7 @@ resource "aws_security_group" "web_alb" {
 resource "aws_security_group" "web_ecs_task" {
   name        = "${local.name_prefix}-web-ecs-task"
   description = "Fargate UI tasks: ingress only from the ALB; egress to pull image + logs"
-  vpc_id      = var.web_ecs_vpc_id
+  vpc_id      = local.web_vpc_id
 
   ingress {
     description     = "Container port from the ALB"
@@ -102,7 +102,7 @@ resource "aws_lb" "web" {
   load_balancer_type = "application"
   internal           = false
   security_groups    = [aws_security_group.web_alb.id]
-  subnets            = var.web_ecs_public_subnet_ids
+  subnets            = local.web_public_subnet_ids
   tags               = local.common_tags
 }
 
@@ -110,7 +110,7 @@ resource "aws_lb_target_group" "web" {
   name        = "${local.name_prefix}-web-tg"
   port        = 80
   protocol    = "HTTP"
-  vpc_id      = var.web_ecs_vpc_id
+  vpc_id      = local.web_vpc_id
   target_type = "ip" # Fargate awsvpc tasks register by IP
 
   health_check {
@@ -158,6 +158,12 @@ resource "aws_ecs_task_definition" "web" {
       portMappings = [
         { containerPort = 80, protocol = "tcp" }
       ]
+      # nginx reverse-proxies /v1/* to the CURRENT API Gateway; injecting it here (not baking it into
+      # the image) means a teardown that mints a new API Gateway id is healed by a plain `terraform
+      # apply` — the new task def revision carries the new URL. trimsuffix → the API base (no path).
+      environment = [
+        { name = "API_BASE_URL", value = trimsuffix(module.api_gateway.ask_url, "/v1/ask") }
+      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -179,7 +185,7 @@ resource "aws_ecs_service" "web" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = var.web_ecs_public_subnet_ids
+    subnets          = local.web_public_subnet_ids
     security_groups  = [aws_security_group.web_ecs_task.id]
     assign_public_ip = true # public subnet → reach ECR/CloudWatch without a NAT
   }
