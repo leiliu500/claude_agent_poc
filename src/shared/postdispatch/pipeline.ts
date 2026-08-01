@@ -14,7 +14,7 @@
  * always returns a document within the HTTP sync deadline. GATEWAY_MOCK forces the deterministic path
  * so tests / local mode stay hermetic (no Bedrock).
  */
-import type { AnalyticsResult, DispatchResult } from "../types.js";
+import type { AgentStep, AnalyticsResult, DispatchResult } from "../types.js";
 import { createLogger } from "../logger.js";
 import { getBackend } from "../gateway/registry.js";
 import { postDispatchModelConfigured, runDynamicAgent } from "./agent.js";
@@ -42,7 +42,12 @@ export interface PostDispatchOutput {
   insights: string[];
   /** Which backend's policy ran, for tracing. */
   backendId: string;
+  /** Per-agent execution-path steps (analytics, report) for the UI's trace panel. */
+  steps: AgentStep[];
 }
+
+/** Model id a post-dispatch agent runs on (spec override, else the configured default). */
+const POST_MODEL = process.env.POSTDISPATCH_MODEL ?? process.env.FOUNDATION_MODEL ?? undefined;
 
 /** Agents run only with a real model AND outside hermetic mock mode (tests/local stay deterministic). */
 function agentsEnabled(): boolean {
@@ -129,14 +134,21 @@ async function runAgents(
   const operationId = operationIdOf(gw);
   const analyticsSpec = agents.find((a) => a.role === "analytics");
   const reportSpec = agents.find((a) => a.role === "report");
+  const steps: AgentStep[] = [];
 
   // 1) Ephemeral analytics agent: derive insights over the rows + trusted rollups. The base prompt is
   //    specialized to the invoked operation (per-operation overlay) for the length of this one call.
   let insights: string[] = [];
   if (analyticsSpec) {
     const spec = { ...analyticsSpec, prompt: composePrompt(analyticsSpec, operationId, op) };
+    const t0 = performance.now();
     const raw = await runDynamicAgent(spec, buildContext(input, gw));
     insights = parseInsights(raw);
+    steps.push({
+      stage: "analytics", agent: "Analytics agent", engine: "llm", status: "ran",
+      model: analyticsSpec.model ?? POST_MODEL, detail: `${insights.length} insight(s)`,
+      latencyMs: Math.round(performance.now() - t0),
+    });
   }
 
   // 2) Ephemeral report agent: transform the insights + aggregates into an executive summary — also
@@ -144,10 +156,16 @@ async function runAgents(
   let summary: string | undefined;
   if (reportSpec) {
     const spec = { ...reportSpec, prompt: composePrompt(reportSpec, operationId, op) };
+    const t0 = performance.now();
     summary = (await runDynamicAgent(spec, buildContext(input, gw, insights))).trim() || undefined;
+    steps.push({
+      stage: "report", agent: "Report agent", engine: "llm", status: "ran",
+      model: reportSpec.model ?? POST_MODEL, detail: summary ? "summary written" : "no summary",
+      latencyMs: Math.round(performance.now() - t0),
+    });
   }
 
-  return { summary, insights, backendId };
+  return { summary, insights, backendId, steps };
 }
 
 /** Reject if the agent sequence outruns the budget, so the caller degrades within the HTTP deadline. */

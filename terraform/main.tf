@@ -137,12 +137,34 @@ module "lambda_workers" {
       # POSTDISPATCH_MODEL activates the per-app post-dispatch agents (Fedline analytics→report) via the
       # Converse API. Bounded + fallback: any failure/timeout degrades to the deterministic report, so
       # this is safe to enable. Needs the DB role's bedrock:InvokeModel + the bedrock-runtime VPC endpoint.
-      environment            = merge({ LOG_LEVEL = var.log_level, POSTDISPATCH_MODEL = var.foundation_model }, local.db_lambda_env)
+      # Bounded so the LLM router + the two post-dispatch agents (analytics→report) all fit under the
+      # flow's sync budget (FLOW_TIMEOUT_MS): a warm request is ~router 5s + agents ~5s each. On a cold
+      # start these may exceed and degrade to the deterministic report — the trace then shows those
+      # agents as skipped rather than blocking. (Removing the vestigial supervisor agent node would
+      # reclaim ~3s and make post-dispatch fit reliably even cold.)
+      environment = merge({
+        LOG_LEVEL          = var.log_level
+        POSTDISPATCH_MODEL = var.foundation_model
+        # foundation_model is a REASONING model (openai.gpt-oss-*): it emits a chain-of-thought block
+        # that consumes output tokens BEFORE the answer, so every agent's token budget must cover
+        # reasoning + the answer or the agent returns empty text (same reason the router needs ~1500).
+        POSTDISPATCH_MAX_TOKENS  = "2000"
+        GATEWAY_AGENT_MAX_TOKENS = "1500"
+        # Four LLM hops run in sequence per request (route → gateway discover → analytics → report). Now
+        # that the entrypoint runs via a Function URL (no 30s cap), these are generous so a genuinely slow
+        # agent path completes instead of degrading; the sum still stays under FLOW_TIMEOUT_MS (115s) and
+        # the flow-process Lambda timeout (120s). Any single hop that exceeds its bound still falls back.
+        LLM_ROUTER_TIMEOUT_MS         = "20000"
+        GATEWAY_AGENT_TIMEOUT_MS      = "20000"
+        POSTDISPATCH_BUDGET_MS        = "45000"
+        POSTDISPATCH_AGENT_TIMEOUT_MS = "20000"
+      }, local.db_lambda_env)
       vpc_subnet_ids         = local.db_subnet_ids
       vpc_security_group_ids = local.db_sg_ids
-      timeout                = var.lambda_timeout_seconds
-      memory_size            = var.lambda_memory_mb
-      description            = "Flow node: combined dispatch+analytics+report; reads/writes per-user report memory."
+      # ~2 min so the full multi-agent path can complete (the entrypoint's Function URL allows it).
+      timeout     = 120
+      memory_size = var.lambda_memory_mb
+      description = "Flow node: combined dispatch+analytics+report; reads/writes per-user report memory."
     }
     # ── One-off DB migration: applies db/schema.sql to RDS from inside the VPC (invoke manually
     #    after a schema change; the script is idempotent). Only useful when the database is enabled. ──
@@ -226,15 +248,20 @@ module "lambda_entrypoint" {
         BEDROCK_REGION     = local.region
         FLOW_ID            = module.bedrock_flow.flow_id
         FLOW_ALIAS_ID      = module.bedrock_flow.flow_alias_id
-        # Bound the synchronous flow wait so a slow agent dispatch falls back to local within
-        # API Gateway's 30s cap. Raise/lower per environment; the agent path still runs server-side.
-        FLOW_TIMEOUT_MS = "24000"
+        # The web front-end reaches this Lambda through a Function URL (not API Gateway), so the full
+        # multi-agent path can run up to ~2 min instead of being cut off at API Gateway's 30s cap.
+        # FLOW_TIMEOUT_MS bounds the flow wait just under the Lambda timeout (120s), so a genuinely
+        # stuck run still degrades to the fast local result before the Lambda is killed.
+        FLOW_TIMEOUT_MS = "115000"
+        # The Function URL has no API-Gateway authorizer, so the entrypoint self-verifies the bearer
+        # token with the SAME secret the authorizer uses (shared/auth.verifyToken).
+        AUTH_JWT_SECRET = random_password.jwt_secret.result
         # Gateway action Lambda invoked directly for file-upload submits (SCP EASy files, etc.).
         GATEWAY_FN = module.lambda_workers.function_names["action-gateway"]
       }
-      timeout     = 60
+      timeout     = 120
       memory_size = var.lambda_memory_mb
-      description = "API Gateway entrypoint: invokes the supervisor→analytics→report flow."
+      description = "API entrypoint (Function URL + API Gateway): invokes the supervisor→analytics→report flow."
     }
   }
 }

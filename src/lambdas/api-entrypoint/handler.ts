@@ -15,6 +15,7 @@
  */
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
 import type { AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
+import { extractBearer, verifyToken } from "../../shared/auth.js";
 import { orchestrate } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
@@ -121,15 +122,29 @@ function respond(statusCode: number, body: AskResponse): APIGatewayProxyResultV2
  * carries a userId. Returns undefined only when the route is unauthenticated (no authorizer wired).
  */
 function readAuthContext(event: AskEvent): AuthContext | undefined {
+  // Preferred: the API-Gateway authorizer already verified the token and injected the identity.
   const ctx = event.requestContext?.authorizer?.lambda;
-  if (!ctx || !ctx.userId) return undefined;
-  let identifiers: Record<string, string> = {};
-  try {
-    identifiers = ctx.ids ? (JSON.parse(ctx.ids) as Record<string, string>) : {};
-  } catch {
-    identifiers = {};
+  if (ctx && ctx.userId) {
+    let identifiers: Record<string, string> = {};
+    try {
+      identifiers = ctx.ids ? (JSON.parse(ctx.ids) as Record<string, string>) : {};
+    } catch {
+      identifiers = {};
+    }
+    return { userId: ctx.userId, userName: ctx.userName ?? ctx.username ?? "", identifiers };
   }
-  return { userId: ctx.userId, userName: ctx.userName ?? ctx.username ?? "", identifiers };
+
+  // Lambda Function URL path (used for long, >30s agent runs that don't fit API Gateway's 30s cap):
+  // there is no authorizer, so verify the bearer token HERE with the same secret + HS256 the authorizer
+  // uses. An invalid/expired/absent token yields no auth context → the request is treated as anonymous
+  // (orchestrate then requires a name, i.e. it's effectively rejected).
+  const secret = process.env.AUTH_JWT_SECRET;
+  const header = event.headers?.authorization ?? event.headers?.Authorization;
+  const token = extractBearer(header);
+  if (!secret || !token) return undefined;
+  const res = verifyToken(token, secret, Math.floor(Date.now() / 1000));
+  if (!res.valid) return undefined;
+  return { userId: res.claims.sub, userName: res.claims.name || res.claims.username, identifiers: res.claims.ids ?? {} };
 }
 
 /** Deterministic, in-process equivalent of the whole flow (identity → orchestrate → report). */

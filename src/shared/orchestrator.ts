@@ -17,30 +17,54 @@
  * collaborator agents; this is the reference implementation and the test seam.
  */
 import type { AgentType, AuthContext, DispatchResult, RoutingDecision, TaskParams, TaskRequest } from "./types.js";
-import { route } from "./router.js";
+import { route, extractParams } from "./router.js";
 import { llmRoute } from "./llm-router.js";
 import { executeTask } from "./dispatch.js";
+import { getUseCase } from "./usecases.js";
 import { extractUserName, lookupUserIdentifiers } from "./user-directory.js";
 import { recallLatestReport, recallReport, rememberReport } from "./report-memory.js";
-import { retrieveOperations } from "./gateway/registry.js";
+import { discoverOperation } from "./gateway/discovery-agent.js";
 import { ValidationError } from "./errors.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger({ mod: "orchestrator" });
 
-/**
- * Below this static-routing confidence the question doesn't map cleanly to a fixed report use case,
- * so we consult the Agentic API Gateway registry: a runtime-registered backend may serve it. This is
- * the deterministic mirror of the supervisor delegating an out-of-domain request to the Gateway
- * collaborator. With no backends registered, retrieval returns nothing and static routing stands.
- */
-const GATEWAY_STATIC_CONF_FLOOR = 0.5;
+/** How the routing decision was made — surfaced in the UI's agent-trace panel. */
+export interface RouteMeta {
+  engine: "llm" | "deterministic";
+  confidence: number;
+  /** Foundation model id when the LLM router decided. */
+  model?: string;
+  latencyMs: number;
+  useCases: string[];
+}
+
+/** Whether the Layer-2 gateway discovery agent ran for this request — surfaced in the trace. */
+export interface GatewayMeta {
+  /** True when the gateway agent discovered the operation (vs. KB / multi-task keeping the Layer-1 tasks). */
+  ran: boolean;
+  /** "llm" when gateway.md drove the pick; "proxy" on the deterministic top-candidate fallback. */
+  engine?: "llm" | "proxy";
+  model?: string;
+  backendId?: string;
+  operationId?: string;
+  /** The agent's confidence, or the top retrieval relevance score on the fallback (0..1). */
+  score?: number;
+  latencyMs?: number;
+}
 
 export interface OrchestrationResult {
   type: AgentType;
   userName: string;
   results: DispatchResult[];
+  /** The routing step's metadata (engine/confidence/model), for the execution-path trace. */
+  routeMeta: RouteMeta;
+  /** Layer-2 gateway discovery metadata (ran + match score), for the execution-path trace. */
+  gatewayMeta: GatewayMeta;
 }
+
+/** The model the LLM router uses (mirrors llm-router / post-dispatch config). */
+const ROUTER_MODEL = process.env.POSTDISPATCH_MODEL ?? process.env.FOUNDATION_MODEL ?? undefined;
 
 /** Use cases whose endpoint needs a reportId that an eddSummaryReport must produce first. */
 const REPORT_ID_DEPENDENTS = new Set(["eddDetailReport", "eddExportDetailReport"]);
@@ -258,25 +282,6 @@ async function resolveIdentity(
 }
 
 /**
- * Consult the gateway registry for a question and, if a backend operation matches, invoke it through
- * the generic proxy. Returns the gateway DispatchResult, or undefined when nothing is registered/
- * matches (so the caller falls through to static report routing). Best-effort: never throws.
- */
-async function tryGateway(question: string, identifiers: Record<string, string>): Promise<{ results: DispatchResult[] } | undefined> {
-  try {
-    const matches = await retrieveOperations(question, 1);
-    const top = matches[0];
-    if (!top) return undefined;
-    const params: TaskParams = { ...identifiers, backendId: top.backendId, operationId: top.operation.operationId };
-    const result = await executeTask({ type: "Gateway", useCase: top.operation.operationId, params });
-    return { results: [result] };
-  } catch (err) {
-    log.warn("gateway fallback failed; continuing with static routing", { error: String(err) });
-    return undefined;
-  }
-}
-
-/**
  * Run the full supervisor-equivalent pipeline for a question. When `auth` is provided (an
  * authenticated request), the caller's identity + identifiers come from the verified token;
  * otherwise identity is parsed from the question text (legacy/test path).
@@ -287,18 +292,49 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   // LLM router drives when a model is configured (and validates its pick against the catalog); the
   // deterministic keyword router is the safety net. This is what makes routing genuinely agentic
   // instead of always falling through to regex — every LLM miss/fallback is logged in llm-router.
+  const routeStart = performance.now();
   const llm = await llmRoute(question);
   const decision: RoutingDecision = llm ?? route(question);
   const routedBy = llm ? "llm" : "deterministic";
+  const routeMeta: RouteMeta = {
+    engine: routedBy,
+    confidence: decision.confidence,
+    model: routedBy === "llm" ? ROUTER_MODEL : undefined,
+    latencyMs: Math.round(performance.now() - routeStart),
+    useCases: decision.tasks.map((t) => t.useCase),
+  };
 
-  // Agentic API Gateway fallback: when the question doesn't map cleanly to a fixed report type, a
-  // runtime-registered backend may serve it. Merge the caller's identifiers so the proxy can fill
-  // path/query params from the user's profile, exactly as the report collaborators do.
-  if (decision.confidence < GATEWAY_STATIC_CONF_FLOOR) {
-    const gw = await tryGateway(question, identifiers);
-    if (gw) {
-      log.info("orchestrating (gateway)", { userName, backendId: gw.results[0]?.meta?.backendId, useCase: gw.results[0]?.useCase });
-      return { type: "Gateway", userName, results: gw.results };
+  // Layer 2 — Gateway discovery AGENT (gateway.md). For a single-operation APPLICATION request (not a
+  // knowledge question, not a multi-deliverable orchestration), the gateway agent discovers WHICH
+  // registered backend operation serves it, straight from the live registry — the step that makes a
+  // newly-registered app reachable with no code change, and the step that actually runs gateway.md.
+  // KB and multi-task requests keep the Layer-1 task list (preserving the KB path and the EDD
+  // summary→detail / "and export" chains). When the registry has nothing to match (e.g. local/tests),
+  // discovery returns undefined and we fall through to the Layer-1 tasks too.
+  let gatewayMeta: GatewayMeta = { ran: false };
+  if (decision.type !== "KB" && decision.tasks.length === 1) {
+    const disc = await discoverOperation(question, identifiers);
+    if (disc) {
+      const spec = getUseCase(disc.operationId);
+      const type: AgentType = spec?.type ?? "Gateway";
+      // Deterministic param extraction wins over the agent's (regex is reliable for dates/ids), under
+      // the caller's identifiers; backendId/operationId pin the discovered target for the proxy.
+      const params = mergeParams(identifiers, {
+        ...disc.params,
+        ...extractParams(question),
+        backendId: disc.backendId,
+        operationId: disc.operationId,
+      });
+      gatewayMeta = {
+        ran: true, engine: disc.engine, model: disc.model,
+        backendId: disc.backendId, operationId: disc.operationId,
+        score: disc.confidence, latencyMs: disc.latencyMs,
+      };
+      log.info("orchestrating (gateway agent)", {
+        userName, backendId: disc.backendId, operationId: disc.operationId, engine: disc.engine, confidence: disc.confidence,
+      });
+      const results = await executeWithDependencies([{ type, useCase: disc.operationId, params }], { userId });
+      return { type, userName, results, routeMeta, gatewayMeta };
     }
   }
 
@@ -317,5 +353,5 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   });
 
   const results = await executeWithDependencies(tasks, { userId });
-  return { type: decision.type, userName, results };
+  return { type: decision.type, userName, results, routeMeta, gatewayMeta };
 }

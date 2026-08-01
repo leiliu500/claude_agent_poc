@@ -234,23 +234,42 @@ describe("dispatch flow node", () => {
 });
 
 describe("flow-process node (combined dispatch+analytics+report)", () => {
-  it("builds a full report from the supervisor's dispatchResults", async () => {
+  it("ignores the supervisor's echoed output and orchestrates from the question (single in-code path)", async () => {
+    // If trusted, this echoed EDD result would surface a bogus riskScore. The in-code path IGNORES it.
     const agentResponse = JSON.stringify({
       type: "EDD",
       tasks: [],
       dispatchResults: [
-        { type: "EDD", useCase: "eddSummaryReport", status: "ok", data: [{ riskScore: 10 }], meta: {}, latencyMs: 2 },
+        { type: "EDD", useCase: "eddSummaryReport", status: "ok", data: [{ riskScore: 9999 }], meta: {}, latencyMs: 2 },
       ],
     });
     const report = await processHandler({
       inputs: [
-        { name: "question", value: "edd summary for 2026-Q2" },
+        { name: "question", value: "user name: Lei Liu, XShip fee summary for 2026-Q2" },
         { name: "agentResponse", value: agentResponse },
       ],
     });
-    expect(report.type).toBe("EDD");
-    expect(report.sections).toHaveLength(1);
-    expect(report.summary).toMatch(/Enhanced Due-Diligence/);
+    // Report reflects the ORCHESTRATED question (XShip), not the echoed EDD dispatchResults.
+    expect(report.type).toBe("XShipReport");
+    expect(JSON.stringify(report.sections)).not.toContain("9999");
+    // The execution trace is always present and begins with the routing step.
+    expect((report.trace ?? []).map((s) => s.stage)).toContain("route");
+  });
+
+  it("emits a complete execution trace (route → gateway → dispatch → post-dispatch)", async () => {
+    const report = await processHandler({
+      inputs: [
+        { name: "question", value: "XShip fee summary for 2026-Q2" },
+        { name: "auth", value: JSON.stringify({ userId: "1", userName: "Lei Liu", identifiers: {} }) },
+      ],
+    });
+    const stages = (report.trace ?? []).map((s) => s.stage);
+    // Every stage appears — gateway + post-dispatch show as "skipped" here (built-in op, no model in tests).
+    expect(stages).toContain("route");
+    expect(stages).toContain("gateway");
+    expect(stages).toContain("dispatch");
+    expect(stages).toContain("analytics");
+    expect(stages).toContain("report");
   });
 
   it("falls back to deterministic orchestration when the agent output is unusable", async () => {
@@ -663,39 +682,26 @@ describe("KB (knowledge base / RAG)", () => {
     expect(report.sections[0]!.rows.length).toBeGreaterThan(0);
   });
 
-  it("rides the flow-process node: a KB supervisor response becomes a KB report", async () => {
-    // What the supervisor emits for a knowledge question: a KB dispatchResult carrying the answer.
+  it("ignores a bogus supervisor response; a KB question orchestrates to a KB report", async () => {
+    // A bogus supervisor result (claims EDD) must be IGNORED — the in-code path orchestrates the question.
     const agentResponse = JSON.stringify({
-      type: "KB",
-      tasks: [{ type: "KB", useCase: "kbSearch", params: { query: "What is the XShip fee waiver policy?" } }],
+      type: "EDD",
+      tasks: [],
       dispatchResults: [
-        {
-          type: "KB",
-          useCase: "kbSearch",
-          status: "ok",
-          data: [{ title: "XShip Fee Waiver Policy", source: "kb://policies/xship-fee-waiver.md", score: 0.9, snippet: "Fees may be waived..." }],
-          meta: {
-            answer: "Based on the knowledge base: shipping fees may be waived for a rollup ABA within a period.",
-            citations: ["XShip Fee Waiver Policy — kb://policies/xship-fee-waiver.md"],
-            query: "What is the XShip fee waiver policy?",
-            matched: 1,
-            retrieval: "memory",
-          },
-          latencyMs: 4,
-        },
+        { type: "EDD", useCase: "eddSummaryReport", status: "ok", data: [{ x: 1 }], meta: {}, latencyMs: 1 },
       ],
     });
     const report = await processHandler({
       inputs: [
-        { name: "question", value: "What is the XShip fee waiver policy?" },
+        { name: "question", value: "What is the knowledge base guideline?" },
         { name: "agentResponse", value: agentResponse },
+        { name: "auth", value: JSON.stringify({ userId: "1", userName: "Lei Liu", identifiers: {} }) },
       ],
     });
+    // The KB question orchestrates to KB (RAG), not the echoed EDD result.
     expect(report.type).toBe("KB");
     expect(report.title).toBe("Knowledge Base Answer");
-    expect(report.summary).toMatch(/waived/);
-    expect(report.summary).toMatch(/Sources:/);
-    expect(report.sections).toHaveLength(1);
+    expect(report.sections.length).toBeGreaterThan(0);
   });
 
   it("flow-process falls back to local KB routing when the supervisor output is unusable", async () => {

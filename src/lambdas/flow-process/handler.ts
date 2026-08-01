@@ -19,13 +19,12 @@
  *
  * Output (to FlowOutput): FinalReport.
  */
-import type { AgentType, AuthContext, DispatchResult, FinalReport, TaskRequest } from "../../shared/types.js";
+import type { AgentStep, AgentType, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
-import { parseSupervisorOutput } from "../../shared/supervisor-parse.js";
-import { orchestrate, rememberSummaryResults, runTasks } from "../../shared/orchestrator.js";
+import { orchestrate, type GatewayMeta, type RouteMeta } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
-import { runPostDispatch } from "../../shared/postdispatch/pipeline.js";
+import { runPostDispatch, type PostDispatchOutput } from "../../shared/postdispatch/pipeline.js";
 import { createLogger } from "../../shared/logger.js";
 
 const log = createLogger({ mod: "flow-process-node" });
@@ -67,56 +66,79 @@ function readEvent(event: unknown): { question: string; agentResponse: string; a
   return { question, agentResponse, auth };
 }
 
-/** Decide the dispatch results: prefer the supervisor's output, else deterministic local routing. */
 /**
- * A KB turn's kbSearch task. KB answers are retrieval-grounded and generated server-side, so we do
- * NOT trust the supervisor's echoed meta.answer (LLMs drop/mangle long tool outputs). We reconstruct
- * the query from the agent's KB task/result, falling back to the original question, and re-run it.
+ * The dispatch results for a request. The in-code orchestrator (LLM router → gateway/registry →
+ * dispatch → post-dispatch agents) is now the SINGLE authoritative path, so the execution trace is
+ * complete and identical on every request. The Bedrock supervisor agent's echoed `agentResponse` is
+ * intentionally NOT used to drive: it was non-deterministic — when it happened to emit a parseable
+ * result it BYPASSED the post-dispatch agents and produced a sparse, inconsistent trace.
  */
-function kbTaskFrom(parsed: ReturnType<typeof parseSupervisorOutput>, question: string): TaskRequest | undefined {
-  const isKb =
-    parsed.type === "KB" ||
-    parsed.tasks.some((t) => t.type === "KB") ||
-    parsed.dispatchResults.some((r) => r.type === "KB");
-  if (!isKb) return undefined;
-
-  const fromTask = parsed.tasks.find((t) => t.type === "KB");
-  const q =
-    (fromTask && typeof fromTask.params.query === "string" && fromTask.params.query) ||
-    (parsed.dispatchResults.find((r) => r.type === "KB")?.meta?.query as string | undefined) ||
-    question;
-  return { type: "KB", useCase: "kbSearch", params: { query: q } };
-}
-
 async function resolveResults(
   question: string,
-  agentResponse: string,
   auth?: AuthContext,
-): Promise<{ type: AgentType; results: DispatchResult[]; source: string }> {
-  const parsed = parseSupervisorOutput(agentResponse);
+): Promise<{ type: AgentType; results: DispatchResult[]; routeMeta: RouteMeta; gatewayMeta: GatewayMeta }> {
+  const { type, results, routeMeta, gatewayMeta } = await orchestrate(question, auth);
+  return { type, results, routeMeta, gatewayMeta };
+}
 
-  // KB: always (re)run the retrieval server-side so the grounded answer is authoritative, regardless
-  // of how the supervisor formatted (or truncated) its echoed KB result.
-  const kbTask = kbTaskFrom(parsed, question);
-  if (kbTask) {
-    return { type: "KB", results: await runTasks([kbTask]), source: "kb-server-side" };
+/**
+ * Assemble the ordered execution-path trace for the UI: routing → gateway → dispatch → post-dispatch
+ * agents. Every step reflects what ACTUALLY ran (or was skipped) — the evidence the system is
+ * agent-driven, and the two-layer (route → gateway) decoupling made visible.
+ */
+function buildTrace(
+  routeMeta: RouteMeta,
+  gatewayMeta: GatewayMeta,
+  results: DispatchResult[],
+  post: PostDispatchOutput | undefined,
+): AgentStep[] {
+  const steps: AgentStep[] = [];
+
+  // 1) Routing agent (Layer 1): human language → target operation(s).
+  steps.push({
+    stage: "route", agent: "Routing classifier", engine: routeMeta.engine, status: "ran",
+    model: routeMeta.model, confidence: routeMeta.confidence,
+    detail: `→ ${routeMeta.useCases.join(", ") || "—"}`, latencyMs: routeMeta.latencyMs,
+  });
+
+  // 2) Gateway discovery AGENT (Layer 2, gateway.md): discovers which registered operation serves the
+  //    request. Runs for single-op application requests; KB / multi-task keep the Layer-1 tasks (skipped).
+  if (gatewayMeta.ran) {
+    steps.push({
+      stage: "gateway", agent: "Gateway agent", engine: gatewayMeta.engine ?? "proxy", status: "ran",
+      model: gatewayMeta.model, confidence: gatewayMeta.score,
+      detail: [gatewayMeta.backendId, gatewayMeta.operationId].filter(Boolean).join(" / ") || "matched",
+      latencyMs: gatewayMeta.latencyMs,
+    });
+  } else {
+    steps.push({
+      stage: "gateway", agent: "Gateway agent", engine: "proxy", status: "skipped",
+      detail: "KB or multi-task request — kept the router's task list",
+    });
   }
 
-  if (parsed.dispatchResults.length > 0) {
-    // The agent already ran the tasks — record any summary reportId so a later turn can reuse it.
-    await rememberSummaryResults(parsed.dispatchResults, auth?.userId);
-    return { type: parsed.type, results: parsed.dispatchResults, source: "agent-results" };
+  // 3) Dynamic execution agent — a runtime executor CREATED PER REQUEST that resolves the discovered
+  //    operation's endpoint + params and invokes it through the generic proxy. One per task, and it
+  //    runs BEFORE the post-dispatch analytics/report agents (it produces the rows they analyse).
+  for (const r of results) {
+    const backend = typeof r.meta?.backendId === "string" ? r.meta.backendId : undefined;
+    steps.push({
+      stage: "dispatch", agent: "Dynamic execution agent", engine: "proxy",
+      status: r.status === "ok" ? "ran" : "fallback",
+      detail: `runtime executor · ${backend ? backend + "/" : ""}${r.useCase} · ${r.data.length} row(s)`,
+      latencyMs: r.latencyMs,
+    });
   }
-  if (parsed.tasks.length > 0) {
-    // Run the agent's chosen tasks through the memory-aware executor so the eddSummary → detail
-    // dependency reuses (or records) reportIds in this user's cross-session memory.
-    return { type: parsed.type, results: await runTasks(parsed.tasks, { userId: auth?.userId }), source: "agent-tasks" };
+
+  // 4) Post-dispatch agents (analytics → report), spawned per operation. Present ⇒ they ran; absent ⇒
+  //    not on this path (a passthrough backend, KB, or a bounded timeout/failure that degraded).
+  if (post && post.steps.length) {
+    steps.push(...post.steps);
+  } else {
+    steps.push({ stage: "analytics", agent: "Analytics agent", engine: "llm", status: "skipped", detail: "not run on this path" });
+    steps.push({ stage: "report", agent: "Report agent", engine: "llm", status: "skipped", detail: "not run on this path" });
   }
-  // Supervisor output unusable — deterministic orchestration over the original question, using the
-  // authenticated identity + IDs carried in the flow's `auth` input (resolves IDs and sequences
-  // EDD summary → detail without needing a name in the question text).
-  const { type, results } = await orchestrate(question, auth);
-  return { type, results, source: "local-orchestrator" };
+  return steps;
 }
 
 export const handler = async (event: unknown): Promise<FinalReport> => {
@@ -128,15 +150,16 @@ export const handler = async (event: unknown): Promise<FinalReport> => {
   });
 
   try {
-    const { type, results, source } = await resolveResults(question, agentResponse, auth);
+    const { type, results, routeMeta, gatewayMeta } = await resolveResults(question, auth);
     const analytics = runAnalytics(results);
 
-    // Per-application divergence: after a Gateway dispatch, the target backend's post-dispatch policy
-    // decides what runs next. Fedline spawns ephemeral analytics → report agents (app-specific prompts);
-    // SCP (passthrough) and every non-Gateway path return `undefined` here and keep the deterministic
-    // report. Bounded + fault-tolerant: any timeout/failure also degrades to the deterministic report.
+    // Per-application divergence: after dispatch, the target backend's post-dispatch policy decides what
+    // runs next. Fedline spawns ephemeral analytics → report agents (app-specific prompts); SCP
+    // (passthrough) and KB return `undefined` here and keep the deterministic report. Bounded +
+    // fault-tolerant: any timeout/failure also degrades to the deterministic report.
     const post = await runPostDispatch({ question, results, analytics });
 
+    const trace = buildTrace(routeMeta, gatewayMeta, results, post);
     const report = generateReport({
       question,
       type,
@@ -144,13 +167,16 @@ export const handler = async (event: unknown): Promise<FinalReport> => {
       analytics,
       summaryOverride: post?.summary,
       agentInsights: post?.insights,
+      trace,
       generatedAt: new Date().toISOString(),
     });
     log.info("process completed", {
       type,
-      source,
+      routedBy: routeMeta.engine,
+      gateway: gatewayMeta.ran,
       sections: report.sections.length,
       postDispatch: post ? post.backendId : "none",
+      agents: trace.filter((s) => s.engine === "llm" && s.status === "ran").length,
     });
     return report;
   } catch (err) {

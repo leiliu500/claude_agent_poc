@@ -12,7 +12,9 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # API: reverse-proxy every /v1/* call to the current API Gateway (base URL injected at start).
+    # NOTE: /v1/ask is routed by the ALB directly to the entrypoint Lambda (a listener rule → Lambda
+    # target group) so it can run ~2 min, bypassing API Gateway's 30s cap — it never reaches nginx.
+    # Everything else under /v1/ (login, etc.) is short — reverse-proxy to the current API Gateway.
     location /v1/ {
         proxy_pass ${API_BASE_URL};
         proxy_ssl_server_name on;              # send SNI so API Gateway's TLS/routing matches

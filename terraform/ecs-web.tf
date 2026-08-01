@@ -103,7 +103,10 @@ resource "aws_lb" "web" {
   internal           = false
   security_groups    = [aws_security_group.web_alb.id]
   subnets            = local.web_public_subnet_ids
-  tags               = local.common_tags
+  # A /v1/ask request can run ~2 min through the Function URL, so the ALB must not drop the idle
+  # browser↔ALB connection while the agent path runs (default is 60s).
+  idle_timeout = 130
+  tags         = local.common_tags
 }
 
 resource "aws_lb_target_group" "web" {
@@ -136,6 +139,47 @@ resource "aws_lb_listener" "web" {
   tags = local.common_tags
 }
 
+# ── Long agent path: ALB → entrypoint Lambda for /v1/ask ─────────────────────────
+# API Gateway hard-caps sync requests at 30s (and Lambda Function URLs aren't available in this
+# GovCloud region), so the ALB forwards /v1/ask straight to the entrypoint Lambda as a target. The
+# ALB idle_timeout (130s) + Lambda timeout (120s) let the full multi-agent path run ~2 min. Same
+# origin as the UI, so no CORS; the entrypoint self-verifies the bearer token (no ALB-side authorizer).
+resource "aws_lb_target_group" "entrypoint" {
+  name        = "${local.name_prefix}-ask-tg"
+  target_type = "lambda"
+  tags        = local.common_tags
+}
+
+resource "aws_lambda_permission" "alb_entrypoint" {
+  statement_id  = "AllowALBInvokeEntrypoint"
+  action        = "lambda:InvokeFunction"
+  function_name = module.lambda_entrypoint.function_names["api-entrypoint"]
+  principal     = "elasticloadbalancing.amazonaws.com"
+  source_arn    = aws_lb_target_group.entrypoint.arn
+}
+
+resource "aws_lb_target_group_attachment" "entrypoint" {
+  target_group_arn = aws_lb_target_group.entrypoint.arn
+  target_id        = module.lambda_entrypoint.function_arns["api-entrypoint"]
+  depends_on       = [aws_lambda_permission.alb_entrypoint]
+}
+
+resource "aws_lb_listener_rule" "ask" {
+  listener_arn = aws_lb_listener.web.arn
+  priority     = 10
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.entrypoint.arn
+  }
+  condition {
+    path_pattern {
+      values = ["/v1/ask"]
+    }
+  }
+  tags = local.common_tags
+}
+
 # ── ECS cluster + task definition + service (Fargate) ────────────────────────────
 resource "aws_ecs_cluster" "web" {
   name = "${local.name_prefix}-web"
@@ -162,6 +206,8 @@ resource "aws_ecs_task_definition" "web" {
       # the image) means a teardown that mints a new API Gateway id is healed by a plain `terraform
       # apply` — the new task def revision carries the new URL. trimsuffix → the API base (no path).
       environment = [
+        # Short calls (login) → API Gateway. The long /v1/ask is routed by the ALB straight to the
+        # entrypoint Lambda (see the listener rule below), so nginx never proxies it.
         { name = "API_BASE_URL", value = trimsuffix(module.api_gateway.ask_url, "/v1/ask") }
       ]
       logConfiguration = {
