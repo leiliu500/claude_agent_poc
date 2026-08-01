@@ -10,7 +10,12 @@
 # Only the three UI files are copied (no README/Dockerfile/etc.), so the image is tiny and clean.
 FROM nginx:1.27-alpine
 
-# nginx's default config already serves /usr/share/nginx/html on :80 with correct MIME types.
+# Static UI files.
 COPY web/index.html web/app.js web/styles.css /usr/share/nginx/html/
+
+# Site config as a TEMPLATE: the nginx image entrypoint renders /etc/nginx/templates/*.template with
+# envsubst at container start, injecting ${API_BASE_URL} (the current API Gateway URL, set on the ECS
+# task by Terraform) so nginx reverse-proxies /v1/* to it — no API URL is baked into the image.
+COPY web/nginx.conf.template /etc/nginx/templates/default.conf.template
 
 EXPOSE 80

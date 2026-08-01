@@ -56,25 +56,38 @@ export function postDispatchModelConfigured(): boolean {
 }
 
 /**
+ * One bounded Bedrock Converse call (model-family agnostic): `system` is the instruction, `user` the
+ * turn; returns the model's text (possibly empty). Reused by the post-dispatch agents AND the in-code
+ * LLM router (shared/llm-router.ts) so both share one client + model config. Throws on transport error
+ * or timeout so callers can fall back deterministically.
+ */
+export async function converseText(
+  system: string,
+  user: string,
+  opts: { modelId?: string; maxTokens?: number; timeoutMs?: number } = {},
+): Promise<string> {
+  const modelId = opts.modelId ?? POSTDISPATCH_MODEL;
+  if (!modelId) throw new Error("No model configured (set POSTDISPATCH_MODEL or FOUNDATION_MODEL).");
+  const { client, Cmd } = await bedrock();
+  const res = await client.send(
+    new Cmd({
+      modelId,
+      system: [{ text: system }],
+      messages: [{ role: "user", content: [{ text: user }] }],
+      inferenceConfig: { maxTokens: opts.maxTokens ?? MAX_TOKENS, temperature: 0 },
+    }),
+    { abortSignal: AbortSignal.timeout(opts.timeoutMs ?? AGENT_TIMEOUT_MS) },
+  );
+  return (res.output?.message?.content?.map((c) => c.text ?? "").join("") ?? "").trim();
+}
+
+/**
  * Run one ephemeral post-dispatch agent: the app-specific prompt is the system instruction and the JSON
  * context is the user turn; return the model's text. Bounded by AGENT_TIMEOUT_MS. Throws on failure so
  * the pipeline can fall back to the deterministic report.
  */
 export async function runDynamicAgent(spec: PostDispatchAgentSpec, context: unknown): Promise<string> {
-  const modelId = spec.model ?? POSTDISPATCH_MODEL;
-  if (!modelId) throw new Error("No post-dispatch model configured (set POSTDISPATCH_MODEL or FOUNDATION_MODEL).");
-
-  const { client, Cmd } = await bedrock();
-  const res = await client.send(
-    new Cmd({
-      modelId,
-      system: [{ text: spec.prompt }],
-      messages: [{ role: "user", content: [{ text: `Context (JSON):\n${JSON.stringify(context)}` }] }],
-      inferenceConfig: { maxTokens: MAX_TOKENS, temperature: 0 },
-    }),
-    { abortSignal: AbortSignal.timeout(AGENT_TIMEOUT_MS) },
-  );
-  const text = (res.output?.message?.content?.map((c) => c.text ?? "").join("") ?? "").trim();
+  const text = await converseText(spec.prompt, `Context (JSON):\n${JSON.stringify(context)}`, { modelId: spec.model });
   if (!text) throw new Error(`Post-dispatch ${spec.role} agent returned empty text`);
   log.info("dynamic agent completed", { role: spec.role, chars: text.length });
   return text;

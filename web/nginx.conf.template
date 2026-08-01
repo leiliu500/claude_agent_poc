@@ -1,0 +1,27 @@
+# nginx site config for the UI container. Rendered from this template at container start by the
+# official nginx image's entrypoint (envsubst over /etc/nginx/templates/*.template), which substitutes
+# ${API_BASE_URL} from the ECS task's environment (set by Terraform to the CURRENT API Gateway base URL).
+#
+# Why: the browser talks to its OWN origin (/v1/ask, /v1/login) and nginx reverse-proxies those to the
+# API Gateway. So the UI has no hardcoded API URL to go stale when a teardown mints a new API Gateway id
+# — a `terraform apply` re-injects the current URL and the next task pulls it up. (nginx's own $variables
+# like $uri/$remote_addr are left untouched: envsubst only replaces names that exist in the environment.)
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # API: reverse-proxy every /v1/* call to the current API Gateway (base URL injected at start).
+    location /v1/ {
+        proxy_pass ${API_BASE_URL};
+        proxy_ssl_server_name on;              # send SNI so API Gateway's TLS/routing matches
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Static UI (SPA-style fallback to index.html).
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
