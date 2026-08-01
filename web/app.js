@@ -16,7 +16,7 @@
   const hosted = hostedEndpoint();
   const cfg = {
     endpoint: hosted || localStorage.getItem("ra.endpoint") || DEFAULT_ENDPOINT,
-    timeoutSec: Number(localStorage.getItem("ra.timeoutSec") || "60"),
+    timeoutSec: Number(localStorage.getItem("ra.timeoutSec") || "125"),
   };
   // Heal a stale saved endpoint so Settings shows the correct one too.
   if (hosted && localStorage.getItem("ra.endpoint") && localStorage.getItem("ra.endpoint") !== hosted) {
@@ -282,6 +282,77 @@
     return el("div", { class: "kb-card" }, children);
   }
 
+  // ---------- Agent execution-path trace ----------
+  // Renders the ordered steps the backend recorded (routing → dispatch → post-dispatch agents) so a
+  // viewer can SEE which agents ran, on which model, and how confident each was — the evidence the
+  // system is genuinely agent-driven. Fields come straight from the backend's real invocation.
+  function renderStep(s) {
+    const status = s.status || "ran";
+    const engine = s.engine || "deterministic";
+    const pill = el("div", { class: "trace-step step-" + status + " engine-" + engine + " stage-" + (s.stage || "") });
+    pill.appendChild(el("div", { class: "step-head" }, [
+      el("span", { class: "step-agent", text: s.agent || s.stage || "step" }),
+      el("span", { class: "step-engine", text: engine }),
+    ]));
+    if (s.model) pill.appendChild(el("div", { class: "step-model", title: "foundation model", text: s.model }));
+
+    if (typeof s.confidence === "number") {
+      const pct = Math.round(Math.max(0, Math.min(1, s.confidence)) * 100);
+      pill.appendChild(el("div", { class: "conf-row" }, [
+        el("div", { class: "conf-bar" }, [el("div", { class: "conf-fill", style: "width:" + pct + "%" })]),
+        el("span", { class: "conf-pct", text: pct + "%" }),
+      ]));
+    } else {
+      pill.appendChild(el("div", { class: "step-status", text: status === "skipped" ? "not run" : status === "fallback" ? "fallback" : "ran ✓" }));
+    }
+
+    const meta = [];
+    if (s.detail) meta.push(s.detail);
+    if (typeof s.latencyMs === "number") meta.push(s.latencyMs + " ms");
+    if (meta.length) pill.appendChild(el("div", { class: "step-detail", text: meta.join(" · ") }));
+    return pill;
+  }
+
+  function renderTrace(trace) {
+    if (!Array.isArray(trace) || !trace.length) return null;
+    const wrap = el("div", { class: "agent-trace" });
+    wrap.appendChild(el("div", { class: "trace-caption", text: "Each step is the real invocation the backend recorded — engine, model, confidence, and latency." }));
+    const strip = el("div", { class: "trace-strip" });
+    trace.forEach((s, i) => {
+      if (i > 0) strip.appendChild(el("div", { class: "trace-arrow", text: "→" }));
+      strip.appendChild(renderStep(s));
+    });
+    wrap.appendChild(strip);
+    return wrap;
+  }
+
+  /** A lightweight tab strip: [{ label, badge?, panel }]. First tab is active; clicking switches. */
+  function buildTabs(tabs) {
+    const bar = el("div", { class: "tab-bar" });
+    const panels = el("div", { class: "tab-panels" });
+    const btns = [];
+    tabs.forEach((t, i) => {
+      t.panel.classList.add("tab-panel");
+      if (i === 0) t.panel.classList.add("active");
+      const btn = el("button", {
+        class: "tab-btn" + (i === 0 ? " active" : ""), type: "button",
+        onclick: () => {
+          btns.forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
+          tabs.forEach((x) => x.panel.classList.remove("active"));
+          t.panel.classList.add("active");
+        },
+      }, [
+        el("span", { text: t.label }),
+        t.badge ? el("span", { class: "tab-badge", text: t.badge }) : null,
+      ]);
+      btns.push(btn);
+      bar.appendChild(btn);
+      panels.appendChild(t.panel);
+    });
+    return el("div", { class: "tabs" }, [bar, panels]);
+  }
+
   function renderReport(report) {
     const wrap = el("div", { class: "report" });
     const kb = kbInfo(report);
@@ -293,26 +364,24 @@
       report.routing && report.routing.requiresOrchestration ? el("span", { class: "badge", text: "orchestrated" }) : null,
     ]));
 
-    // KB: show the grounded answer + provenance card (replaces the generic summary line).
-    if (kb) wrap.appendChild(renderKbCard(kb));
-    else if (report.summary) wrap.appendChild(el("div", { class: "report-summary", text: report.summary }));
+    // ----- Response tab: the answer (KB card / summary + sections + export + footer/raw) -----
+    const responsePanel = el("div", {});
+    if (kb) responsePanel.appendChild(renderKbCard(kb));
+    else if (report.summary) responsePanel.appendChild(el("div", { class: "report-summary", text: report.summary }));
 
     // For KB the section rows are the retrieved passages (evidence) — relabel + collapse them so the
     // answer card stays the focus. Report sections render normally (first open).
     (report.sections || []).forEach((sec, i) =>
-      wrap.appendChild(kb ? renderSection(sec, i, { open: false, heading: "Retrieved passages" }) : renderSection(sec, i)),
+      responsePanel.appendChild(kb ? renderSection(sec, i, { open: false, heading: "Retrieved passages" }) : renderSection(sec, i)),
     );
 
-    // Export controls (tables remain the default view; these download other formats).
-    wrap.appendChild(buildExportBar(report));
+    responsePanel.appendChild(buildExportBar(report));
 
-    // Footer: meta + raw JSON toggle.
     const totalRows = (report.sections || []).reduce((a, s) => a + ((s.rows && s.rows.length) || 0), 0);
     const foot = el("div", { class: "report-foot" });
     if (report.reportId) foot.appendChild(el("span", { text: "id " + report.reportId }));
     foot.appendChild(el("span", { text: totalRows + " total rows" }));
     if (report.generatedAt) foot.appendChild(el("span", { text: new Date(report.generatedAt).toLocaleString() }));
-
     const pre = el("pre", { class: "raw", style: "display:none", text: JSON.stringify(report, null, 2) });
     const toggle = el("button", {
       class: "raw-toggle", type: "button", text: "View raw JSON",
@@ -324,8 +393,17 @@
       },
     });
     foot.appendChild(toggle);
-    wrap.appendChild(foot);
-    wrap.appendChild(pre);
+    responsePanel.appendChild(foot);
+    responsePanel.appendChild(pre);
+
+    // ----- Tabs: Response + (Execution Trace, when the backend recorded one) -----
+    const tabs = [{ label: "Response", panel: responsePanel }];
+    const traceEl = renderTrace(report.trace);
+    if (traceEl) {
+      const ran = (report.trace || []).filter((s) => s.engine === "llm" && s.status === "ran").length;
+      tabs.push({ label: "Execution Trace", badge: String(ran), panel: el("div", {}, [traceEl]) });
+    }
+    wrap.appendChild(buildTabs(tabs));
     return wrap;
   }
 

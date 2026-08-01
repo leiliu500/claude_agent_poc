@@ -158,6 +158,30 @@ export interface NumericSummary {
   count: number;
 }
 
+/**
+ * One stage in the request's execution path, surfaced in the UI so a viewer can SEE which agents ran
+ * and how confident each was — the evidence that the system is genuinely agent-driven, not hardcoded.
+ * Every field is captured from the real invocation (and mirrored in CloudWatch), never fabricated.
+ */
+export interface AgentStep {
+  /** Pipeline stage this step represents. */
+  stage: "route" | "gateway" | "dispatch" | "analytics" | "report";
+  /** Human label shown in the UI (e.g. "Routing classifier", "Analytics agent"). */
+  agent: string;
+  /** What executed it: an LLM call, a deterministic function, or the HTTP proxy. */
+  engine: "llm" | "deterministic" | "proxy";
+  /** Whether it actually ran, was skipped (not on this path), or fell back to deterministic. */
+  status: "ran" | "skipped" | "fallback";
+  /** Foundation model id when engine === "llm" — present ⇒ a model really ran. */
+  model?: string;
+  /** 0..1 confidence (routing) or relevance score (gateway retrieval) or agent self-report. */
+  confidence?: number;
+  /** Short human detail, e.g. "→ ctDepositsSummary" or "3 insights". */
+  detail?: string;
+  /** Wall-clock ms for this step. */
+  latencyMs?: number;
+}
+
 /** The final report returned to the user (Flow node 2 output). */
 export interface FinalReport {
   reportId: string;
@@ -171,6 +195,8 @@ export interface FinalReport {
   summary: string;
   /** Echoed routing decision for traceability. */
   routing: Pick<RoutingDecision, "type" | "requiresOrchestration" | "rationale">;
+  /** Ordered execution path (router → dispatch → post-dispatch agents) for the UI's agent-trace panel. */
+  trace?: AgentStep[];
 }
 
 export interface ReportSection {

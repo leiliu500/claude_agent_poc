@@ -106,6 +106,11 @@ export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
         ...payload.meta,
         label: spec.label,
         exportable: spec.exportable,
+        // These static use cases ARE Fedline backend operations. Stamp the backend id (as the gateway
+        // proxy does) so the post-dispatch pipeline fires Fedline's analytics → report agents on this
+        // local path too — otherwise those agents only ran when a request went through the gateway.
+        backendId: "fedline",
+        operationId: task.useCase,
         ...(endpoint
           ? {
               endpoint: endpoint.url,

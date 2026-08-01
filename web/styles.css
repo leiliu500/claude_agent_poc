@@ -357,3 +357,76 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
   .status { max-width: 120px; }
   .user-name { display: none; }
 }
+
+/* ── Agent execution-path trace ──────────────────────────────────────────────
+   Shows which agents ran, on which model, and their confidence — evidence the
+   system is agent-driven. Horizontally scrollable so it never overflows the page. */
+.agent-trace {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.trace-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-soft); text-transform: uppercase; margin-bottom: 10px;
+}
+.trace-badge {
+  text-transform: none; font-weight: 600; font-size: 11px;
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.trace-strip {
+  display: flex; align-items: stretch; gap: 6px;
+  overflow-x: auto; padding-bottom: 4px;
+}
+.trace-arrow { align-self: center; color: var(--text-soft); font-size: 14px; flex: 0 0 auto; }
+.trace-step {
+  flex: 0 0 auto; min-width: 150px; max-width: 230px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); padding: 9px 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.trace-step.engine-llm { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.trace-step.step-skipped { opacity: .5; }
+.step-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.step-agent { font-size: 13px; font-weight: 600; color: var(--text); }
+.step-engine {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+  padding: 1px 6px; border-radius: 999px; background: var(--code-bg); color: var(--text-soft);
+}
+.engine-llm .step-engine { background: var(--accent-soft); color: var(--accent); }
+.step-model { font-family: var(--mono); font-size: 10.5px; color: var(--text-soft); word-break: break-all; }
+.conf-row { display: flex; align-items: center; gap: 8px; }
+.conf-bar { flex: 1; height: 6px; border-radius: 999px; background: var(--code-bg); overflow: hidden; }
+.conf-fill { height: 100%; background: var(--ok); border-radius: 999px; }
+.conf-pct { font-size: 11px; font-weight: 600; color: var(--text); min-width: 30px; text-align: right; }
+.step-status { font-size: 11px; font-weight: 600; color: var(--text-soft); }
+.step-detail { font-size: 11px; color: var(--text-soft); }
+
+/* ── Report tabs (Response / Execution Trace) ────────────────────────────────── */
+.tabs { margin-top: 4px; }
+.tab-bar { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.tab-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 14px; border: none; background: transparent; cursor: pointer;
+  font-size: 13px; font-weight: 600; color: var(--text-soft);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-badge {
+  font-size: 11px; font-weight: 700; line-height: 1;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+}
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.trace-caption { font-size: 12px; color: var(--text-soft); margin-bottom: 10px; }
+
+/* The dynamic execution agent (runtime API executor) — distinct blue accent so it reads as a
+   first-class runtime agent between the gateway agent and the post-dispatch agents. */
+.trace-step.stage-dispatch { border-color: #4a90d9; box-shadow: inset 3px 0 0 #4a90d9; }
+.trace-step.stage-dispatch .step-engine { background: rgba(74, 144, 217, .16); color: #4a90d9; }

@@ -3,6 +3,7 @@
  * No I/O — used by the report Flow Lambda and by local orchestration mode.
  */
 import type {
+  AgentStep,
   AgentType,
   AnalyticsResult,
   DispatchResult,
@@ -82,6 +83,8 @@ export interface ReportInput {
    * the app-specific analysis surfaces at the top of the report.
    */
   agentInsights?: string[];
+  /** Ordered execution-path steps (router → dispatch → post-dispatch agents) for the UI trace panel. */
+  trace?: AgentStep[];
 }
 
 export function generateReport(input: ReportInput): FinalReport {
@@ -138,6 +141,7 @@ export function generateReport(input: ReportInput): FinalReport {
         requiresOrchestration: dispatchResults.length > 1,
         rationale: "Routing decided upstream by the supervisor agent.",
       },
+    ...(input.trace?.length ? { trace: input.trace } : {}),
   };
 }
 
