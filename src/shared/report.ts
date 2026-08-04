@@ -20,7 +20,7 @@ const TITLES: Record<AgentType, string> = {
   Relationship: "ABA Relationship Report",
   Report: "CT Deposit Report",
   KB: "Knowledge Base Answer",
-  Gateway: "Agentic API Gateway Response",
+  Gateway: "Agentic Application Gateway Response",
 };
 
 /** Stable, time-free id so report generation is deterministic for tests. */
