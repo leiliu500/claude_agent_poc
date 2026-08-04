@@ -1,4 +1,4 @@
-/* Agentic API Gateway — login + session, chat logic, flexible FinalReport rendering. No dependencies. */
+/* Agentic Application Gateway — login + session, chat logic, flexible FinalReport rendering. No dependencies. */
 (() => {
   "use strict";
 
@@ -159,7 +159,7 @@
     const node = el("div", { class: "msg assistant" }, [
       el("div", { class: "avatar", text: "AI" }),
       el("div", { class: "body" }, [
-        el("div", { class: "role", text: "Agentic API Gateway" }),
+        el("div", { class: "role", text: "Agentic Application Gateway" }),
         content,
       ]),
     ]);
