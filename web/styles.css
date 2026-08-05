@@ -356,6 +356,11 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
   .subtitle { display: none; }
   .status { max-width: 120px; }
   .user-name { display: none; }
+  /* Narrow topbar: the Backtest button keeps its glyph but drops the word, so the group still
+     fits beside the title instead of forcing a horizontal overflow. */
+  .btn-label { display: none; }
+  .topbar-btn { padding: 6px 9px; }
+  .topbar-actions { gap: 6px; }
 }
 
 /* ── Agent execution-path trace ──────────────────────────────────────────────
@@ -430,3 +435,80 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
    first-class runtime agent between the gateway agent and the post-dispatch agents. */
 .trace-step.stage-dispatch { border-color: #4a90d9; box-shadow: inset 3px 0 0 #4a90d9; }
 .trace-step.stage-dispatch .step-engine { background: rgba(74, 144, 217, .16); color: #4a90d9; }
+
+/* ── Fedline backtest ────────────────────────────────────────────────────────
+   Validation sweep over every registered Fedline operation. Colour carries meaning here:
+   a failure kind keeps the same hue in the counter tile and on the per-check tag, so a red
+   "false positive" count and the checks that produced it read as one thing. */
+/* Right-hand topbar group: intrinsic width, pinned right; the title column absorbs the slack. */
+.topbar-actions { display: flex; align-items: center; gap: 10px; flex: none; margin-left: auto; min-width: 0; }
+/* A LABELLED topbar button. Distinct from .icon-btn, which is a fixed 34x34 square sized for a
+   single glyph — putting a text label in one overflowed the box and overlaid its neighbours. */
+.topbar-btn {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  width: auto; height: auto; padding: 6px 12px; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.4;
+}
+.topbar-btn:hover { background: var(--bg-soft); border-color: var(--accent); }
+.backtest-dialog { border: none; border-radius: 14px; padding: 0; box-shadow: var(--shadow); width: min(940px, 94vw); max-height: 88vh; color: var(--text); background: var(--bg); }
+.backtest-dialog::backdrop { background: rgba(0,0,0,.45); }
+.backtest-content { display: flex; flex-direction: column; max-height: 88vh; }
+.backtest-head { padding: 18px 22px 14px; border-bottom: 1px solid var(--border); }
+.backtest-head h2 { margin: 0 0 12px; font-size: 18px; }
+.backtest-controls { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.backtest-mode { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-soft); flex: 1 1 320px; }
+.backtest-mode select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-soft); color: var(--text); font-size: 13px; }
+.backtest-body { padding: 16px 22px 22px; overflow-y: auto; }
+.backtest-empty { color: var(--text-soft); font-size: 13px; margin: 6px 0; }
+.bt-error { color: var(--danger); font-size: 13px; margin: 6px 0; }
+
+.bt-headline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.bt-verdict { font-size: 13px; font-weight: 700; letter-spacing: .04em; padding: 5px 10px; border-radius: 7px; }
+.bt-verdict-pass { color: var(--ok); background: rgba(26,127,75,.12); }
+.bt-verdict-fail { color: var(--danger); background: rgba(179,38,30,.12); }
+.bt-headline-meta { font-size: 12px; color: var(--text-soft); }
+
+.bt-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.bt-count { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-soft); }
+.bt-count-value { font-size: 22px; font-weight: 700; line-height: 1.1; }
+.bt-count-label { font-size: 11px; color: var(--text-soft); margin-top: 2px; }
+/* A non-zero counter earns its colour; zero stays neutral so the eye goes to real problems. */
+.bt-count-hit.bt-false_positive { border-color: #b3261e; box-shadow: inset 3px 0 0 #b3261e; }
+.bt-count-hit.bt-false_negative { border-color: #b06f00; box-shadow: inset 3px 0 0 #b06f00; }
+.bt-count-hit.bt-hallucination  { border-color: #8b3fc4; box-shadow: inset 3px 0 0 #8b3fc4; }
+.bt-count-hit.bt-data_integrity { border-color: #4a90d9; box-shadow: inset 3px 0 0 #4a90d9; }
+.bt-count-hit .bt-count-value { color: var(--text); }
+
+.bt-note { font-size: 12px; color: var(--text-soft); border-left: 3px solid var(--border); padding: 6px 10px; margin-bottom: 14px; }
+
+.bt-cases { display: flex; flex-direction: column; gap: 8px; }
+.bt-case { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft); overflow: hidden; }
+.bt-case-fail { border-color: var(--danger); }
+.bt-case-error { border-color: var(--danger); }
+.bt-case-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; cursor: pointer; font-size: 13px; }
+.bt-case-head::-webkit-details-marker { display: none; }
+.bt-case-status { font-size: 11px; font-weight: 700; letter-spacing: .05em; padding: 3px 7px; border-radius: 6px; background: rgba(26,127,75,.14); color: var(--ok); }
+.bt-case-fail .bt-case-status, .bt-case-error .bt-case-status { background: rgba(179,38,30,.14); color: var(--danger); }
+.bt-case-label { font-weight: 600; }
+.bt-case-op { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
+.bt-case-meta { margin-left: auto; font-size: 11px; color: var(--text-soft); }
+.bt-case-question { font-size: 12px; color: var(--text-soft); padding: 0 12px 8px; }
+.bt-case > .bt-case-error { color: var(--danger); font-size: 12px; padding: 0 12px 10px; }
+
+.bt-check-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.bt-check { display: flex; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.bt-check:last-child { border-bottom: none; }
+.bt-check-status { width: 14px; flex: none; text-align: center; font-weight: 700; }
+.bt-check-pass .bt-check-status { color: var(--ok); }
+.bt-check-fail .bt-check-status { color: var(--danger); }
+.bt-check-skip .bt-check-status { color: var(--text-soft); }
+.bt-check-skip { opacity: .75; }
+.bt-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bt-check-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-soft); }
+.bt-check-detail { color: var(--text); overflow-wrap: anywhere; }
+.bt-kind { align-self: flex-start; margin-top: 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 2px 6px; border-radius: 5px; }
+.bt-kind.bt-false_positive { background: rgba(179,38,30,.14); color: #b3261e; }
+.bt-kind.bt-false_negative { background: rgba(176,111,0,.16); color: #b06f00; }
+.bt-kind.bt-hallucination  { background: rgba(139,63,196,.16); color: #8b3fc4; }
+.bt-kind.bt-data_integrity { background: rgba(74,144,217,.16); color: #4a90d9; }

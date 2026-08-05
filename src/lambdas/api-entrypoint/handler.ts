@@ -1,7 +1,8 @@
 /**
  * API Gateway (HTTP API) entrypoint.
  *
- *   POST /v1/ask  { question, sessionId? }  ->  { ok, report, traceId }
+ *   POST /v1/ask       { question, sessionId? }   ->  { ok, report, traceId }
+ *   POST /v1/backtest  { mode?, caseIds? }        ->  { ok, summary, traceId }
  *
  * Best-practice topology: the supervisor agent is a node INSIDE the Bedrock Flow, so this
  * entrypoint's job is just transport + a single InvokeFlow call.
@@ -22,6 +23,8 @@ import { generateReport } from "../../shared/report.js";
 import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
+import { runBacktest } from "../../shared/backtest/run.js";
+import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
 
 /** Max attached-file size, as base64 length (~5 MB of bytes → ~6.7 MB base64), under API Gateway's 10 MB cap. */
 const MAX_FILE_B64 = 6_800_000;
@@ -108,12 +111,55 @@ async function runGatewaySubmit(question: string, file: AskFile, payload: string
   });
 }
 
-function respond(statusCode: number, body: AskResponse): APIGatewayProxyResultV2 {
+function respond(statusCode: number, body: AskResponse | BacktestResponse): APIGatewayProxyResultV2 {
   return {
     statusCode,
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
+}
+
+/** Response of POST /v1/backtest. */
+interface BacktestResponse {
+  ok: boolean;
+  summary?: BacktestSummary;
+  error?: string;
+  traceId: string;
+}
+
+/**
+ * The route this invocation is for. The two front doors carry the path in DIFFERENT fields:
+ *   - API Gateway HTTP API (payload v2) → `requestContext.http.path` / `rawPath`
+ *   - ALB Lambda target group           → `path` (there is no requestContext.http at all)
+ * Both are checked, so a request reaching the same Lambda via either door routes identically.
+ */
+function routeOf(event: AskEvent): "ask" | "backtest" {
+  const albPath = (event as unknown as { path?: string }).path;
+  const path = event.requestContext?.http?.path ?? event.rawPath ?? albPath ?? "";
+  return path.endsWith("/backtest") ? "backtest" : "ask";
+}
+
+/**
+ * Parse the backtest request. Both fields are optional: the default is a full `data`-mode sweep of
+ * every Fedline case, which is what the UI button sends.
+ */
+function parseBacktestBody(event: AskEvent): { mode: BacktestMode; caseIds?: string[] } {
+  let raw = event.body ?? "{}";
+  if (event.isBase64Encoded) raw = Buffer.from(raw, "base64").toString("utf8");
+  let parsed: unknown;
+  try {
+    parsed = raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    throw new ValidationError("Request body must be valid JSON.");
+  }
+  const body = (parsed ?? {}) as { mode?: unknown; caseIds?: unknown };
+  if (body.mode !== undefined && body.mode !== "data" && body.mode !== "full") {
+    throw new ValidationError("Field 'mode' must be 'data' or 'full'.");
+  }
+  const caseIds = Array.isArray(body.caseIds)
+    ? body.caseIds.filter((c): c is string => typeof c === "string")
+    : undefined;
+  return { mode: (body.mode as BacktestMode) ?? "data", caseIds };
 }
 
 /**
@@ -189,6 +235,27 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
   const trace = traceId(event);
   const reqLog = log.child({ trace });
   try {
+    // Validation sweep over the Fedline backend — no question, no orchestration; it replays every
+    // registered operation through the dispatch path and checks the response tables.
+    if (routeOf(event) === "backtest") {
+      // MUST be gated here, not only at the edge. The API-Gateway route sits behind the token
+      // authorizer, but the ALB long-path has no authorizer at all — without this check `full` mode
+      // (one model call per Fedline operation) would be reachable by an unauthenticated caller.
+      // Guarded on the secret so local/dev runs without auth configured still work.
+      const backtestAuth = readAuthContext(event);
+      if (!backtestAuth && process.env.AUTH_JWT_SECRET) {
+        reqLog.warn("backtest rejected: no valid session token");
+        return respond(401, { ok: false, error: "UNAUTHORIZED: a valid session token is required.", traceId: trace });
+      }
+      const { mode, caseIds } = parseBacktestBody(event);
+      reqLog.info("backtest received", { mode, caseIds: caseIds?.length ?? 0 });
+      const summary = await runBacktest({ mode, caseIds });
+      reqLog.info("backtest completed", {
+        mode, failed: summary.totals.failed, checksFailed: summary.totals.checksFailed,
+      });
+      return respond(200, { ok: true, summary, traceId: trace });
+    }
+
     const { question, file, payload } = parseBody(event);
 
     // Identity comes from the verified session token (via the authorizer context), not the question

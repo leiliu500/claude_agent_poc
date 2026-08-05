@@ -53,10 +53,19 @@
             <span class="brand">Agentic Application Gateway</span>
             <span class="subtitle">Fedline · SCP · any registered app — Bedrock agentic backend</span>
           </div>
-          <div class="status" id="connStatus" title="API endpoint">…</div>
-          <div class="user-box" id="userBox" hidden>
-            <span class="user-name" id="userName" title="Signed in"></span>
-            <button class="icon-btn" id="logoutBtn" title="Sign out">Sign out</button>
+          <!-- Right-hand controls are one flex group with flex:none, so they keep their intrinsic
+               width and the title (flex:1, min-width:0) is what truncates when space runs out.
+               Previously the labelled Backtest button reused .icon-btn, a fixed 34x34 square, so its
+               text overflowed the box and sat on top of the title and status. -->
+          <div class="topbar-actions">
+            <button class="topbar-btn" id="backtestBtn" title="Validate every Fedline response table">
+              <span aria-hidden="true">🧪</span><span class="btn-label">Backtest</span>
+            </button>
+            <div class="status" id="connStatus" title="API endpoint">…</div>
+            <div class="user-box" id="userBox" hidden>
+              <span class="user-name" id="userName" title="Signed in"></span>
+              <button class="topbar-btn" id="logoutBtn" title="Sign out">Sign out</button>
+            </div>
           </div>
         </header>
 
@@ -132,6 +141,33 @@
           <button value="save" id="saveSettings" class="btn primary">Save</button>
         </div>
       </form>
+    </dialog>
+
+    <!--
+      Fedline backtest dialog. Replays every registered Fedline operation through the real dispatch
+      path and reports the three failure modes the validation suite classifies: false positives,
+      false negatives and hallucinated figures, plus self-contradicting table data.
+    -->
+    <dialog id="backtestDialog" class="backtest-dialog">
+      <div class="backtest-content">
+        <header class="backtest-head">
+          <h2>Fedline response validation</h2>
+          <div class="backtest-controls">
+            <label class="backtest-mode">
+              <span>Mode</span>
+              <select id="backtestMode">
+                <option value="data">Data — table checks (fast, no model calls)</option>
+                <option value="full">Full — adds routing + grounding (calls the model)</option>
+              </select>
+            </label>
+            <button type="button" class="btn primary" id="backtestRun">Run backtest</button>
+            <button type="button" class="btn ghost" id="backtestClose">Close</button>
+          </div>
+        </header>
+        <div class="backtest-body" id="backtestBody">
+          <p class="backtest-empty">Run the backtest to validate every Fedline operation's response table.</p>
+        </div>
+      </div>
     </dialog>
 
     <script src="app.js"></script>

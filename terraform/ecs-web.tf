@@ -139,11 +139,15 @@ resource "aws_lb_listener" "web" {
   tags = local.common_tags
 }
 
-# ── Long agent path: ALB → entrypoint Lambda for /v1/ask ─────────────────────────
+# ── Long agent path: ALB → entrypoint Lambda for /v1/ask + /v1/backtest ──────────
 # API Gateway hard-caps sync requests at 30s (and Lambda Function URLs aren't available in this
-# GovCloud region), so the ALB forwards /v1/ask straight to the entrypoint Lambda as a target. The
+# GovCloud region), so the ALB forwards these straight to the entrypoint Lambda as a target. The
 # ALB idle_timeout (130s) + Lambda timeout (120s) let the full multi-agent path run ~2 min. Same
 # origin as the UI, so no CORS; the entrypoint self-verifies the bearer token (no ALB-side authorizer).
+#
+# /v1/backtest rides the same path because its `full` mode issues a model call per Fedline operation
+# and does not fit the 30s API-Gateway cap. The API-Gateway route stays for `data` mode / direct
+# callers; whichever front door serves the request, the handler branches on the path.
 resource "aws_lb_target_group" "entrypoint" {
   name        = "${local.name_prefix}-ask-tg"
   target_type = "lambda"
@@ -174,7 +178,7 @@ resource "aws_lb_listener_rule" "ask" {
   }
   condition {
     path_pattern {
-      values = ["/v1/ask"]
+      values = ["/v1/ask", "/v1/backtest"]
     }
   }
   tags = local.common_tags

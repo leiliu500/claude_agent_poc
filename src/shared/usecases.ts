@@ -178,7 +178,9 @@ export const USE_CASES: readonly UseCaseSpec[] = [
     type: "XShipReport",
     label: "XShip Institution Report",
     description: "Per-institution shipping report for a rollup ABA and period.",
-    keywords: ["xship", "institution", "by institution"],
+    // "institution fee(s)" is the phrasing that distinguishes this from the catch-all XShip Fee:
+    // without it "XShip institution fees" scored higher for the generic total.
+    keywords: ["xship", "institution", "by institution", "institution fee", "institution fees", "fees by institution"],
     exportable: false,
     params: [ROLLUP_ABA_NAME, XS_PERIOD],
     endpoint: { method: "GET", path: "/xshipreport/view/XShipInstitution/{rollupAbaName}/{period}" },
@@ -188,7 +190,8 @@ export const USE_CASES: readonly UseCaseSpec[] = [
     type: "XShipReport",
     label: "XShip Waiver Report",
     description: "Fee waivers granted for a rollup ABA and period.",
-    keywords: ["xship", "waiver", "waived", "waivers"],
+    // "fee waiver(s)" must outweigh the bare "XShip Fee" label match that the same phrasing triggers.
+    keywords: ["xship", "waiver", "waived", "waivers", "fee waiver", "fee waivers", "waived fee"],
     exportable: false,
     params: [ROLLUP_ABA_NAME, XS_PERIOD],
     endpoint: { method: "GET", path: "/xshipreport/view/XShipWaiver/{rollupAbaName}/{period}" },

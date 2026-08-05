@@ -8,16 +8,74 @@
 import type { AgentType, RoutingDecision, TaskParams, TaskRequest } from "./types.js";
 import { USE_CASES, type UseCaseSpec } from "./usecases.js";
 
-/** Score a use case against the lowercased question by keyword hits. */
-function scoreUseCase(question: string, uc: UseCaseSpec): number {
-  let score = 0;
-  for (const kw of uc.keywords) {
-    if (question.includes(kw)) score += kw.includes(" ") ? 2 : 1; // phrase hits weigh more
+/**
+ * Word-boundary matcher with simple plural tolerance: `relationship` matches "relationships",
+ * `fee` matches "fees". Cached per term (built once per process).
+ *
+ * Plural tolerance is REQUIRED — a strict `\bterm\b` stops "relationship" matching "relationships",
+ * which silently drops a use case's only distinctive keyword. Tolerance alone would reintroduce
+ * double counting (both "fee" and "fees" hitting one token), so `scoreUseCase` claims spans.
+ */
+const WORD_RE = new Map<string, RegExp>();
+function matchTerm(question: string, term: string): { start: number; end: number } | undefined {
+  let re = WORD_RE.get(term);
+  if (!re) {
+    re = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:e?s)?\\b`);
+    WORD_RE.set(term, re);
   }
-  // Exact id mention is a strong signal.
-  if (question.includes(uc.id.toLowerCase())) score += 5;
-  if (question.includes(uc.label.toLowerCase())) score += 4;
-  return score;
+  const hit = re.exec(question);
+  return hit ? { start: hit.index, end: hit.index + hit[0].length } : undefined;
+}
+
+/** How many use cases declare this keyword — a term in many use cases discriminates poorly. */
+const TERM_FREQUENCY = new Map<string, number>();
+for (const uc of USE_CASES) {
+  for (const kw of new Set(uc.keywords)) TERM_FREQUENCY.set(kw, (TERM_FREQUENCY.get(kw) ?? 0) + 1);
+}
+
+interface UseCaseScore {
+  /** Keyword/label points. */
+  score: number;
+  /** Sum of 1/frequency over matched keywords — how DISTINCTIVE the evidence was. Breaks ties. */
+  specificity: number;
+}
+
+/**
+ * Score a use case against the lowercased question.
+ *
+ * Each matched SPAN of the question is counted once. Keywords are tried longest-first, so a
+ * specific phrase claims its span before a shorter generic word can also collect from it: "fees"
+ * scores once for XShip Fee, not once as "fee" and again as "fees" — the double count that let the
+ * catch-all total outrank the specific report a question actually named.
+ *
+ * The label bonus is deliberately small. Short labels like "XShip Fee" sit inside more specific
+ * phrasings ("xship fee waivers"), so a label match must never by itself beat a distinctive phrase.
+ */
+function scoreUseCase(question: string, uc: UseCaseSpec): UseCaseScore {
+  let score = 0;
+  let specificity = 0;
+  const claimed: Array<{ start: number; end: number }> = [];
+  const claim = (span: { start: number; end: number }): boolean => {
+    if (claimed.some((c) => span.start < c.end && span.end > c.start)) return false;
+    claimed.push(span);
+    return true;
+  };
+
+  // Longest first: the most specific phrase gets first claim on the text it covers.
+  for (const kw of [...uc.keywords].sort((a, b) => b.length - a.length)) {
+    const span = matchTerm(question, kw);
+    if (!span || !claim(span)) continue;
+    score += kw.includes(" ") ? 3 : 1; // phrase hits weigh more
+    specificity += 1 / (TERM_FREQUENCY.get(kw) ?? 1);
+  }
+
+  // Id/label are INDEPENDENT signals and deliberately do not compete for spans with the keywords
+  // above — a label is normally built from its own keywords ("XShip Fee" = "xship" + "fee"), so
+  // span-claiming them together would cancel the bonus out entirely.
+  if (matchTerm(question, uc.id.toLowerCase())) score += 5; // exact id mention is a strong signal
+  if (matchTerm(question, uc.label.toLowerCase())) score += 2;
+
+  return { score, specificity };
 }
 
 const QUARTER_RE = /\b(20\d{2})[ -]?q([1-4])\b/i;
@@ -159,7 +217,7 @@ export function route(question: string): RoutingDecision {
     };
   }
 
-  const scored = USE_CASES.map((uc) => ({ uc, score: scoreUseCase(q, uc) })).filter((s) => s.score > 0);
+  const scored = USE_CASES.map((uc) => ({ uc, ...scoreUseCase(q, uc) })).filter((s) => s.score > 0);
 
   if (scored.length === 0) {
     // Nothing matched — default to the most common entrypoint with low confidence.
@@ -173,7 +231,9 @@ export function route(question: string): RoutingDecision {
     };
   }
 
-  scored.sort((a, b) => b.score - a.score);
+  // Equal scores are broken by SPECIFICITY, not by declaration order. A tie used to hand the win to
+  // whichever use case happened to be listed first in USE_CASES, which is not a routing signal at all.
+  scored.sort((a, b) => b.score - a.score || b.specificity - a.specificity);
   const top = scored[0]!;
   const primaryType: AgentType = top.uc.type;
 
@@ -220,7 +280,16 @@ function selectOrchestratedTasks(
       /\b(and|also|then|plus)\b[^.]*\b(export|download|csv|excel|pdf|extract|file)\b/.test(q) ||
       /\b(export|download)\s+(it|this|that|them)\b/.test(q);
 
-    const exportUC = best.exportable ? best : candidates.find((c) => c.exportable && shareKeyword(c, best));
+    // "internal"/"confidential" phrasing names a DIFFERENT export artifact than the plain one.
+    // extractParams already captures it; without this the signal was dropped and every export
+    // request resolved to the first exportable sibling — handing out the plain export for a
+    // question that explicitly asked for the internal one.
+    const internalUC = params.internal === true
+      ? candidates.find((c) => c.exportable && c.keywords.some((k) => k === "internal" || k === "confidential"))
+      : undefined;
+
+    const exportUC = internalUC
+      ?? (best.exportable ? best : candidates.find((c) => c.exportable && shareKeyword(c, best)));
     const baseUC = best.exportable ? candidates.find((c) => !c.exportable && shareKeyword(c, best)) : best;
 
     if (exportUC) {
@@ -236,10 +305,15 @@ function selectOrchestratedTasks(
   }
 
   const tasks: TaskRequest[] = [{ type: best.type, useCase: best.id, params }];
-  // No export requested: include any other use case the question explicitly enumerates.
-  for (const c of candidates.slice(1, 3)) {
-    if (q.includes(c.id.toLowerCase()) || q.includes(c.label.toLowerCase())) {
-      tasks.push({ type: c.type, useCase: c.id, params });
+  // No export requested: include another use case only when the question genuinely enumerates a
+  // SECOND deliverable ("the summary and the detail"). The conjunction is required — without it a
+  // short sibling label that happens to sit inside the primary phrasing ("XShip Fee" inside "xship
+  // fee waivers") was silently added as an extra task, so a single-report question returned two.
+  if (/\b(and|also|plus|then|along with|as well as)\b/.test(q)) {
+    for (const c of candidates.slice(1, 3)) {
+      if (matchTerm(q, c.id.toLowerCase()) || matchTerm(q, c.label.toLowerCase())) {
+        tasks.push({ type: c.type, useCase: c.id, params });
+      }
     }
   }
   return tasks;
