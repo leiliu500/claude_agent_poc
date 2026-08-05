@@ -258,6 +258,20 @@ module "lambda_entrypoint" {
         AUTH_JWT_SECRET = random_password.jwt_secret.result
         # Gateway action Lambda invoked directly for file-upload submits (SCP EASy files, etc.).
         GATEWAY_FN = module.lambda_workers.function_names["action-gateway"]
+        # A model reachable FROM THE ENTRYPOINT. Two consumers:
+        #   1. /v1/backtest `full` mode — its routing + grounding checks grade the agent layer, so
+        #      without a model here they graded the deterministic fallback instead and every
+        #      grounding check reported `skip`. The checks are only evidence if a model answers them.
+        #   2. the local-pipeline fallback (flow unavailable) — now agentic instead of keyword-only.
+        # Same budgets as flow-process: foundation_model is a REASONING model, so the token budget
+        # must cover the chain-of-thought block BEFORE the answer or the agent returns empty text.
+        POSTDISPATCH_MODEL            = var.foundation_model
+        POSTDISPATCH_MAX_TOKENS       = "2000"
+        GATEWAY_AGENT_MAX_TOKENS      = "1500"
+        LLM_ROUTER_TIMEOUT_MS         = "20000"
+        GATEWAY_AGENT_TIMEOUT_MS      = "20000"
+        POSTDISPATCH_BUDGET_MS        = "45000"
+        POSTDISPATCH_AGENT_TIMEOUT_MS = "20000"
       }
       timeout     = 120
       memory_size = var.lambda_memory_mb

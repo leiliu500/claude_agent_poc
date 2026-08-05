@@ -78,6 +78,18 @@ resource "aws_apigatewayv2_route" "ask" {
   authorizer_id      = aws_apigatewayv2_authorizer.token.id
 }
 
+# Fedline validation backtest. Same Lambda + same authorizer as /v1/ask (the handler branches on the
+# path). Its default "data" mode is deterministic and returns well inside API Gateway's 30s cap, so
+# unlike /v1/ask it needs no ALB long-path escape hatch.
+resource "aws_apigatewayv2_route" "backtest" {
+  api_id    = aws_apigatewayv2_api.this.id
+  route_key = "POST /v1/backtest"
+  target    = "integrations/${aws_apigatewayv2_integration.entrypoint.id}"
+
+  authorization_type = "CUSTOM"
+  authorizer_id      = aws_apigatewayv2_authorizer.token.id
+}
+
 # The static frontend is now hosted on ECS Fargate behind an ALB (see terraform/ecs-web.tf); the
 # former GET /app route + web-serve Lambda integration have been removed. This API only serves /v1/*.
 

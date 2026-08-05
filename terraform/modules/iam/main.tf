@@ -47,7 +47,7 @@ resource "aws_iam_role_policy_attachment" "lambda_entrypoint_logs" {
 }
 
 data "aws_iam_policy_document" "entrypoint_bedrock" {
-  # The entrypoint only invokes the flow (the supervisor agent runs inside it).
+  # Normal request path: the entrypoint invokes the flow (the supervisor agent runs inside it).
   statement {
     sid     = "InvokeFlow"
     effect  = "Allow"
@@ -55,6 +55,21 @@ data "aws_iam_policy_document" "entrypoint_bedrock" {
     resources = [
       "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:flow/*",
       "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:flow/*/alias/*"
+    ]
+  }
+
+  # The entrypoint ALSO runs models directly, in two cases:
+  #   1. /v1/backtest `full` mode — the routing + grounding checks are only meaningful if a real
+  #      model answers them; without this the backtest silently graded the deterministic fallback.
+  #   2. the local-pipeline fallback when the flow is unavailable — previously that path degraded to
+  #      the keyword router because no model was reachable from here.
+  statement {
+    sid     = "InvokeModel"
+    effect  = "Allow"
+    actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse"]
+    resources = [
+      "arn:${local.partition}:bedrock:${local.region}::foundation-model/*",
+      "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:inference-profile/*"
     ]
   }
 }

@@ -691,6 +691,170 @@
   // ---------- Sidebar toggle ----------
   $("sidebarToggle").addEventListener("click", () => $("sidebar").classList.toggle("collapsed"));
 
+  // ---------- Fedline backtest ----------
+  // Replays every registered Fedline operation through the backend's real dispatch path and renders
+  // the validation verdict per case. The four counters map 1:1 to the failure kinds the server
+  // classifies (see shared/backtest/types.ts) so nothing is re-derived or re-labelled here.
+  const backtestDialog = $("backtestDialog");
+  const backtestBody = $("backtestBody");
+  let backtestBusy = false;
+
+  const backtestEndpoint = () => cfg.endpoint.replace(/\/v1\/ask\b.*$/, "/v1/backtest");
+
+  function countPill(label, value, kind) {
+    return el("div", { class: "bt-count" + (value > 0 ? " bt-count-hit bt-" + kind : "") }, [
+      el("div", { class: "bt-count-value", text: String(value) }),
+      el("div", { class: "bt-count-label", text: label }),
+    ]);
+  }
+
+  function renderCheck(check) {
+    const status = check.status || "pass";
+    const row = el("div", { class: "bt-check bt-check-" + status });
+    row.appendChild(el("span", { class: "bt-check-status", text: status === "pass" ? "✓" : status === "skip" ? "–" : "✕" }));
+    const text = el("div", { class: "bt-check-text" }, [
+      el("div", { class: "bt-check-id", text: check.id }),
+      el("div", { class: "bt-check-detail", text: check.detail || "" }),
+    ]);
+    if (check.failureKind) {
+      text.appendChild(el("span", { class: "bt-kind bt-" + check.failureKind, text: check.failureKind.replace(/_/g, " ") }));
+    }
+    row.appendChild(text);
+    return row;
+  }
+
+  function renderCase(c) {
+    const failed = (c.checks || []).filter((k) => k.status === "fail");
+    const skipped = (c.checks || []).filter((k) => k.status === "skip");
+    const details = el("details", { class: "bt-case bt-case-" + c.status });
+    // Anything that is not a clean pass opens by default — failures should never need a click to see.
+    if (c.status !== "pass") details.open = true;
+
+    const meta = [
+      c.rowCount + " row" + (c.rowCount === 1 ? "" : "s"),
+      (c.checks || []).length + " checks",
+      failed.length + " failed",
+    ];
+    if (skipped.length) meta.push(skipped.length + " skipped");
+    if (typeof c.latencyMs === "number") meta.push(c.latencyMs + " ms");
+
+    details.appendChild(el("summary", { class: "bt-case-head" }, [
+      el("span", { class: "bt-case-status", text: c.status === "pass" ? "PASS" : c.status === "fail" ? "FAIL" : "ERROR" }),
+      el("span", { class: "bt-case-label", text: c.label || c.operationId }),
+      el("code", { class: "bt-case-op", text: c.operationId }),
+      el("span", { class: "bt-case-meta", text: meta.join(" · ") }),
+    ]));
+
+    if (c.error) details.appendChild(el("div", { class: "bt-case-error", text: c.error }));
+    if (c.question && c.question !== "—") {
+      details.appendChild(el("div", { class: "bt-case-question", text: "Question: " + c.question }));
+    }
+    const list = el("div", { class: "bt-check-list" });
+    // Failures first, then skips, then passes — the reading order that matters.
+    []
+      .concat(failed, skipped, (c.checks || []).filter((k) => k.status === "pass"))
+      .forEach((k) => list.appendChild(renderCheck(k)));
+    details.appendChild(list);
+    return details;
+  }
+
+  function renderBacktest(summary) {
+    const t = summary.totals || {};
+    const wrap = el("div", { class: "bt-result" });
+
+    wrap.appendChild(el("div", { class: "bt-headline" }, [
+      el("span", {
+        class: "bt-verdict " + (t.failed || t.errored ? "bt-verdict-fail" : "bt-verdict-pass"),
+        text: t.failed || t.errored ? "FAILURES FOUND" : "ALL CHECKS PASSED",
+      }),
+      el("span", {
+        class: "bt-headline-meta",
+        text:
+          summary.backendId + " · " + summary.mode + " mode · " + t.cases + " cases · " +
+          t.checks + " checks · " + summary.durationMs + " ms",
+      }),
+    ]));
+
+    wrap.appendChild(el("div", { class: "bt-counts" }, [
+      countPill("False positives", t.falsePositives || 0, "false_positive"),
+      countPill("False negatives", t.falseNegatives || 0, "false_negative"),
+      countPill("Hallucinations", t.hallucinations || 0, "hallucination"),
+      countPill("Data integrity", t.dataIntegrity || 0, "data_integrity"),
+    ]));
+
+    if (t.checksSkipped) {
+      wrap.appendChild(el("div", {
+        class: "bt-note",
+        text: t.checksSkipped + " check(s) skipped — a skipped check was not exercised and is not a pass. " +
+          (summary.mode === "data" ? "Run 'full' mode to exercise routing and grounding." : "Their preconditions were unavailable on this deployment."),
+      }));
+    }
+
+    const cases = el("div", { class: "bt-cases" });
+    // Failing cases float to the top; passes keep registry order below them.
+    []
+      .concat((summary.cases || []).filter((c) => c.status !== "pass"), (summary.cases || []).filter((c) => c.status === "pass"))
+      .forEach((c) => cases.appendChild(renderCase(c)));
+    wrap.appendChild(cases);
+    return wrap;
+  }
+
+  async function runBacktest() {
+    if (backtestBusy) return;
+    if (!session) {
+      backtestBody.replaceChildren(el("p", { class: "bt-error", text: "Sign in first — the backtest endpoint requires a session token." }));
+      return;
+    }
+    backtestBusy = true;
+    const mode = $("backtestMode").value === "full" ? "full" : "data";
+    $("backtestRun").disabled = true;
+    backtestBody.replaceChildren(el("p", {
+      class: "backtest-empty",
+      text: mode === "full"
+        ? "Running full backtest — routing and grounding call the model, this can take a while…"
+        : "Running table-data backtest…",
+    }));
+
+    const controller = new AbortController();
+    // Full mode issues one model call per case, so it rides the ALB long-path (same as /v1/ask)
+    // rather than API Gateway's 30s cap. Clamp to 125s: the ALB idle timeout is 130s and the Lambda
+    // times out at 120s, so waiting longer than this can only ever report a server-side timeout.
+    const budgetSec = Math.min(125, Math.max(5, cfg.timeoutSec) * (mode === "full" ? 3 : 1));
+    const timer = setTimeout(() => controller.abort(), budgetSec * 1000);
+    try {
+      const res = await fetch(backtestEndpoint(), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer " + session.token },
+        body: JSON.stringify({ mode }),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = null; }
+      if (!res.ok || !data || !data.ok || !data.summary) {
+        const msg = (data && data.error) || ("HTTP " + res.status + " — " + text.slice(0, 300));
+        backtestBody.replaceChildren(el("p", { class: "bt-error", text: "Backtest failed: " + msg }));
+      } else {
+        backtestBody.replaceChildren(renderBacktest(data.summary));
+      }
+    } catch (err) {
+      backtestBody.replaceChildren(el("p", {
+        class: "bt-error",
+        text: err && err.name === "AbortError"
+          ? "Backtest timed out after " + budgetSec + "s. Try 'data' mode, or raise the timeout in Settings."
+          : "Backtest failed: " + (err && err.message ? err.message : String(err)),
+      }));
+    } finally {
+      clearTimeout(timer);
+      backtestBusy = false;
+      $("backtestRun").disabled = false;
+    }
+  }
+
+  $("backtestBtn").addEventListener("click", () => backtestDialog.showModal());
+  $("backtestClose").addEventListener("click", () => backtestDialog.close());
+  $("backtestRun").addEventListener("click", runBacktest);
+
   // ---------- Settings ----------
   const dialog = $("settingsDialog");
   $("settingsBtn").addEventListener("click", () => {
