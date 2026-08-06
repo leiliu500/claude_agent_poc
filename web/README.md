@@ -83,24 +83,43 @@ what the backends returned, service health, and a live activity feed.
 card says so instead of drawing a zero, and a value that is only reachable by hovering does
 not exist — every chart ships a **Table** toggle showing the same data.
 
-### Two sources, one shape
+### Two producers, one payload
 
-| Source | What it covers | Where it lives |
-|--------|----------------|----------------|
-| **Deployment** (default) | Every request this deployment served, for all users | `fedline.request_log`, read via `POST /v1/metrics` |
-| **This browser** | Only the requests this browser made | `localStorage` (capped ring buffer, 300 records) |
+The dashboard renders a single aggregate payload. What changes with the source is only **where the
+arithmetic happened**, never what a metric means:
 
-Both record the identical record shape, so one aggregation layer serves both. The dashboard
-prefers the server log and falls back to the local store — silently in behaviour, never in
-labelling: the badge in the filter row always names the source actually in use, and a
-capped read is flagged rather than presented as complete.
+| Source | What it covers | Where it is computed |
+|--------|----------------|----------------------|
+| **Deployment** (default) | Every request this deployment served, for all users | **In SQL**, over every matching row of `fedline.request_log` (`POST /v1/metrics`) |
+| **This browser** | Only the requests this browser made | In JS, over `localStorage` (capped ring buffer, 300 records) |
+
+The database does the aggregation. The dashboard does **not** fetch raw rows and add them up —
+that capped every KPI at the fetch limit, so "requests in range: 2,000" could really have meant
+"2,000, and we stopped counting". There is no truncation caveat any more because there is nothing
+left to truncate: the totals are the totals.
+
+Both producers are held to the same definitions, and `src/__tests__/metrics-aggregation.test.ts`
+pins the ones that are easy to get wrong on either side:
+
+- percentiles are **linear-interpolated** (`percentile_cont`) over `latencyMs > 0` — a missing
+  timing is not an observation of "0 ms";
+- a **model invocation** is `engine='llm' AND status='ran'` — a skipped step never happened, and a
+  fallback step means the model call *failed* and deterministic code answered;
+- a **fallback step still executed**, so it counts in the engine mix even though it is not a model
+  invocation — the mix's total and its "N fell back" note come from the same set;
+- an **empty bucket** has a total of 0 (a real observation: no requests) but a null latency (no
+  observation at all), so the line breaks instead of interpolating through it;
+- an **empty prior window** yields no baseline, so the KPI shows no delta rather than "+100%".
+
+The dashboard prefers the server and falls back to the local store — silently in behaviour, never
+in labelling: the badge in the filter row always names the source actually in use.
 
 The server source needs `enable_database = true` (the request log is a Postgres table and the
 `/v1/metrics` route is only created with it). Without it the dashboard runs on local data alone.
 
-Two measurements differ by source and are labelled accordingly: the browser records the
-caller's whole **round trip**, the server records its own **processing time**. The requested
-export format is a browser-side signal only — the download happens in the client.
+Two measurements differ by source and are labelled accordingly: the browser records the caller's
+whole **round trip**, the server records its own **processing time**. The requested export format
+is a browser-side signal only — the download happens in the client.
 
 ### Sections
 

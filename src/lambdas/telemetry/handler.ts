@@ -10,40 +10,43 @@
  *      caller pays only the ~10ms enqueue and never blocks on the insert.
  *
  *   2. READ — POST /v1/metrics behind the same token authorizer as /v1/ask:
- *          { rangeMs?, from?, to?, limit?, scope? }   ->  { ok, source, records, truncated }
- *      Returns observations in EXACTLY the shape the browser records locally, so the dashboard
- *      swaps sources without a second aggregation layer.
+ *          { rangeMs?, from?, to?, buckets?, scope? }  ->  { ok, source, ...MetricsPayload }
+ *      Returns AGGREGATES computed in SQL over the whole window, not a page of rows. The dashboard
+ *      used to fetch raw records and sum them in the browser, which silently capped every KPI at
+ *      the fetch limit; the database now does the arithmetic over every matching row.
  *
- * When the database is disabled the read path returns an empty set with `source: "unavailable"` —
- * the dashboard then stays on its local store instead of showing an error.
+ * When the database is disabled the read path returns `source: "unavailable"` — the dashboard then
+ * aggregates its local store with the same definitions and says which source it used.
  */
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
 import { hasDatabase } from "../../shared/pg.js";
-import { appendRequestLog, readRequestLog } from "../../shared/request-log.js";
-import type { RequestLogInput, RequestLogRecord } from "../../shared/request-log.js";
+import { appendRequestLog } from "../../shared/request-log.js";
+import type { RequestLogInput } from "../../shared/request-log.js";
+import { aggregateRequestLog } from "../../shared/request-metrics.js";
+import type { MetricsPayload } from "../../shared/request-metrics.js";
 import { createLogger } from "../../shared/logger.js";
 
 const log = createLogger({ mod: "telemetry" });
 
-/** Hard cap on a single read, so one request can never pull the whole table into memory. */
-const MAX_LIMIT = 2000;
-const DEFAULT_LIMIT = 1000;
 /** Widest window a caller may ask for (30 days) — matches the dashboard's longest range. */
 const MAX_RANGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** Series resolution. Bounded so one request cannot ask the database for thousands of buckets. */
+const MAX_BUCKETS = 200;
+const DEFAULT_BUCKETS = 12;
 
 interface LogEvent {
   mode: "log";
   record: RequestLogInput;
 }
 
-interface MetricsResponse {
-  ok: boolean;
-  source: "postgres" | "unavailable";
-  records?: RequestLogRecord[];
-  /** True when the limit clipped the window — the dashboard says so rather than implying totality. */
-  truncated?: boolean;
-  error?: string;
-}
+/**
+ * There is no `truncated` flag any more, and its absence is the point: the aggregates cover every
+ * row in the window, so there is nothing left to clip. The two row-level lists (failures, activity)
+ * are deliberately bounded, and each is labelled in the UI as "most recent N".
+ */
+type MetricsResponse =
+  | ({ ok: true; source: "postgres" } & MetricsPayload)
+  | { ok: boolean; source: "unavailable"; error?: string };
 
 interface AuthorizerLambdaContext {
   userId?: string;
@@ -63,7 +66,8 @@ interface MetricsRequest {
   rangeMs?: number;
   from?: string;
   to?: string;
-  limit?: number;
+  /** Number of time buckets for the series. Clamped server-side. */
+  buckets?: number;
   /** "me" restricts to the calling user; anything else (default) is the deployment-wide view. */
   scope?: "me" | "all";
 }
@@ -115,24 +119,41 @@ export const handler = async (event: MetricsEvent | LogEvent): Promise<APIGatewa
     return respond(401, { ok: false, source: "unavailable", error: "UNAUTHORIZED: a valid session token is required." });
   }
   if (!hasDatabase()) {
-    return respond(200, { ok: true, source: "unavailable", records: [] });
+    return respond(200, { ok: true, source: "unavailable" });
   }
 
   const req = parseBody(event);
   const { from, to } = resolveWindow(req);
-  const limit = Math.max(1, Math.min(MAX_LIMIT, Number(req.limit) || DEFAULT_LIMIT));
+  // The immediately preceding window of equal length, for the KPI deltas. Only offered when it lies
+  // wholly inside the retained range — comparing against a window we would not serve on its own
+  // would produce a delta against partial history.
+  const span = to.getTime() - from.getTime();
+  const prevFromMs = from.getTime() - span;
+  const hasPrev = to.getTime() - prevFromMs <= MAX_RANGE_MS;
+  const buckets = Math.max(1, Math.min(MAX_BUCKETS, Number(req.buckets) || DEFAULT_BUCKETS));
 
   try {
-    const records = await readRequestLog({
+    // Aggregated in SQL over the WHOLE window — not a page of rows summed in the browser, which is
+    // what made these numbers describe "the most recent N requests" instead of the range.
+    const payload = await aggregateRequestLog({
       from,
       to,
-      limit,
+      prevFrom: hasPrev ? new Date(prevFromMs) : null,
+      prevTo: hasPrev ? from : null,
+      buckets,
       userRef: req.scope === "me" ? ctx.userId : undefined,
     });
-    log.info("metrics read", { from: from.toISOString(), to: to.toISOString(), returned: records.length, scope: req.scope ?? "all" });
-    return respond(200, { ok: true, source: "postgres", records, truncated: records.length >= limit });
+    if (!payload) return respond(200, { ok: true, source: "unavailable" });
+    log.info("metrics aggregated", {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      requests: payload.totals.requests,
+      buckets,
+      scope: req.scope ?? "all",
+    });
+    return respond(200, { ok: true, source: "postgres", ...payload });
   } catch (err) {
-    log.error("metrics read failed", { error: String(err) });
+    log.error("metrics aggregation failed", { error: String(err) });
     return respond(500, { ok: false, source: "unavailable", error: "Could not read the request log." });
   }
 };

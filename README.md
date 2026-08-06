@@ -102,15 +102,23 @@ curl -s -X POST "$API_URL/v1/metrics" \
 The UI has a second view alongside the chat — volume, latency, the execution path each request
 took, backend output, health and a live activity feed. See [`web/README.md`](web/README.md).
 
-It reads from either source, in the same record shape:
+Two producers, one payload. What changes with the source is where the arithmetic happened, never
+what a metric means:
 
 - **`fedline.request_log`** (deployment-wide, all users) via `POST /v1/metrics`. One row per
   `/v1/ask` attempt, written by the `telemetry` Lambda. The entrypoint has no VPC attachment — it
   must reach the Bedrock public endpoints — so it fires an **async** (`Event`) invoke at that
   Lambda rather than writing to RDS itself, and swallows every telemetry failure: a dashboard that
-  costs availability is a bad trade.
-- **the browser's own `localStorage`**, which works before the log is deployed, with
+  costs availability is a bad trade. **Reads are aggregated in SQL over every matching row**
+  (`src/shared/request-metrics.ts`) — the dashboard never pulls raw rows to sum in the browser,
+  which used to cap every KPI at the fetch limit.
+- **the browser's own `localStorage`**, aggregated in JS with the identical definitions
+  (`web/telemetry.js` → `aggregateLocal`). Works before the log is deployed, with
   `enable_database = false`, or when the API is unreachable.
+
+`src/__tests__/metrics-aggregation.test.ts` pins the shared definitions — interpolated percentiles
+over timed requests only, a model invocation as `engine='llm' AND status='ran'`, fallback steps as
+executed-but-not-invocations, empty buckets as a gap rather than a zero.
 
 The table and the `/v1/metrics` route only exist with `enable_database = true`. Adding the table
 to an existing deployment is the usual idempotent migration — re-invoke the `db-migrate` Lambda

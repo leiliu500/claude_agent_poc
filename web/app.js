@@ -927,7 +927,7 @@
           signal: controller.signal,
         });
         // A deployment without the route answers 404 — treat that as "no server source", not a fault.
-        if (res.status === 404) return { ok: true, source: "unavailable", records: [] };
+        if (res.status === 404) return { ok: true, source: "unavailable" };
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch { data = null; }

@@ -27,13 +27,18 @@
   let resizeTimer = 0;
 
   // ---------- Data source ----------
-  // Two sources record the SAME observation shape:
-  //   · server — fedline.request_log via POST /v1/metrics: deployment-wide, durable, every user.
-  //   · local  — this browser's localStorage: works offline and before the log is deployed.
-  // "auto" prefers the server and silently falls back; the badge in the filter row always names the
-  // source actually in use, because the two answer different questions and must never be conflated.
+  // Two producers of ONE payload shape (see src/shared/request-metrics.ts and the mirror in
+  // telemetry.js `aggregateLocal`):
+  //   · server — Postgres aggregates fedline.request_log in SQL over the WHOLE window;
+  //   · local  — this browser's own records, aggregated in JS with the same definitions.
+  // The server is preferred and the fallback is silent in behaviour but never in labelling — the
+  // badge in the filter row always names the source actually in use, because the two answer
+  // different questions (a deployment vs one browser) and must never be conflated.
+  //
+  // The dashboard no longer pulls raw rows to add up itself. That capped every KPI at the fetch
+  // limit, so a "requests in range" of 2000 could really mean "2000 and we stopped counting".
   let sourceMode = "auto"; // "auto" | "server" | "local"
-  let dataset = { source: "local", records: [], truncated: false, note: null };
+  let dataset = { source: "local", metrics: null, note: null };
   let loading = false;
 
   /** Server latency is server-side processing; local latency is the caller's whole round trip. */
@@ -42,39 +47,47 @@
       ? "Server processing time — median and 95th percentile"
       : "Client-measured round trip — median and 95th percentile";
 
+  /** The window the UI is asking about. The payload echoes back the window actually served. */
+  function requestedWindow() {
+    const to = Date.now();
+    const range = T.RANGES.find((r) => r.id === rangeId) || T.RANGES[1];
+    const buckets = BUCKETS[rangeId] || 12;
+    if (range.ms === null) {
+      // "All recorded": locally that means back to the oldest record we hold; the server clamps to
+      // its own retention and tells us what it used.
+      const recs = T.all();
+      const first = recs.length ? recs[0].ts : to - 60 * 60 * 1000;
+      const from = Math.min(first, to - 60 * 1000);
+      return { from, to, prevFrom: null, prevTo: null, buckets, rangeMs: MAX_SERVER_RANGE_MS };
+    }
+    return { from: to - range.ms, to, prevFrom: to - 2 * range.ms, prevTo: to - range.ms, buckets, rangeMs: range.ms };
+  }
+
+  const localMetrics = (win) => T.aggregateLocal(T.all(), win);
+
   async function loadData() {
-    const local = () => T.all();
+    const win = requestedWindow();
     if (sourceMode === "local") {
-      dataset = { source: "local", records: local(), truncated: false, note: null };
+      dataset = { source: "local", metrics: localMetrics(win), note: null };
       return;
     }
-    const range = T.RANGES.find((r) => r.id === rangeId) || T.RANGES[1];
     try {
       loading = true;
-      // "All recorded" has no client-side bound; the server clamps to its own maximum window and
-      // reports what it actually returned.
-      const res = await bridge.fetchMetrics({ rangeMs: range.ms ?? 30 * 24 * 60 * 60 * 1000, limit: 2000 });
-      if (res && res.ok && res.source === "postgres" && Array.isArray(res.records)) {
-        dataset = {
-          source: "server",
-          // The server returns newest-first; every aggregation here assumes ascending time.
-          records: res.records.slice().sort((a, b) => a.ts - b.ts),
-          truncated: Boolean(res.truncated),
-          note: null,
-        };
+      // Ask for aggregates, not rows: the database does the arithmetic over every matching row.
+      const res = await bridge.fetchMetrics({ rangeMs: win.rangeMs, buckets: win.buckets });
+      if (res && res.ok && res.source === "postgres" && res.totals && res.window) {
+        dataset = { source: "server", metrics: res, note: null };
         return;
       }
       dataset = {
         source: "local",
-        records: local(),
-        truncated: false,
+        metrics: localMetrics(win),
         note: sourceMode === "server" ? "The deployment-wide request log is not available on this deployment." : null,
       };
     } catch (err) {
       dataset = {
         source: "local",
-        records: local(),
-        truncated: false,
+        metrics: localMetrics(win),
         note: "Could not reach the request log — showing this browser's own records. " + (err && err.message ? err.message : ""),
       };
     } finally {
@@ -110,25 +123,8 @@
   // ---------- Time window ----------
   /** Bucket counts chosen so each bucket is a round-ish unit and labels never crowd. */
   const BUCKETS = { "1h": 12, "24h": 12, "7d": 14, "30d": 15, all: 12 };
-
-  function windowOf(records) {
-    const to = Date.now();
-    const range = T.RANGES.find((r) => r.id === rangeId) || T.RANGES[1];
-    if (range.ms === null) {
-      const first = records.length ? records[0].ts : to - 60 * 60 * 1000;
-      // Pad the tail so the newest record isn't pinned to the very edge of the axis.
-      const from = Math.min(first, to - 60 * 1000);
-      return { from, to, prevFrom: null, prevTo: null, buckets: BUCKETS.all, label: range.label };
-    }
-    return {
-      from: to - range.ms,
-      to,
-      prevFrom: to - 2 * range.ms,
-      prevTo: to - range.ms,
-      buckets: BUCKETS[range.id] || 12,
-      label: range.label,
-    };
-  }
+  /** Mirrors MAX_RANGE_MS in the telemetry Lambda — the widest window the server will serve. */
+  const MAX_SERVER_RANGE_MS = 30 * 24 * 60 * 60 * 1000;
 
   const two = (n) => String(n).padStart(2, "0");
   function bucketLabel(ts, spanMs) {
@@ -218,131 +214,121 @@
     return tile;
   }
 
-  // ---------- Derived metrics ----------
-  const isLlmRan = (st) => st.engine === "llm" && st.status === "ran";
-
-  function summarize(recs) {
-    const lat = recs.map((r) => r.latencyMs).filter((v) => v > 0);
-    const steps = T.agg.steps(recs);
-    return {
-      total: recs.length,
-      ok: recs.filter((r) => r.ok).length,
-      failed: recs.filter((r) => !r.ok).length,
-      successRate: recs.length ? (recs.filter((r) => r.ok).length / recs.length) * 100 : null,
-      p50: T.agg.percentile(lat, 0.5),
-      p95: T.agg.percentile(lat, 0.95),
-      llmSteps: steps.filter(isLlmRan).length,
-      fallbacks: steps.filter((st) => st.status === "fallback").length,
-      rows: recs.reduce((a, r) => a + (r.rows || 0), 0),
-      orchestrated: recs.filter((r) => r.orchestrated).length,
-    };
-  }
-
   // ---------- Sections ----------
-  function heroRow(cur, prev, buckets, tk, width) {
+  /*
+   * Everything below renders a MetricsPayload — the aggregates, already computed. There is no
+   * summarize()/bucketize() step here any more: the arithmetic happens once, in whichever producer
+   * owns the data, and the view only formats it.
+   */
+  const succRate = (t) => (t && t.requests ? (t.succeeded / t.requests) * 100 : null);
+
+  function heroRow(M, tk, width) {
+    const cur = M.totals;
+    const prev = M.prev;
     const spark = (vals, accent) => C.sparkline({ values: vals, accent, width: 104, height: 26 });
-    const perBucket = (fn) => buckets.map((b) => fn(b.records));
+    const col = (key) => M.series.map((b) => b[key] ?? 0);
     const delta = (a, b) => (prev === null || b === null || b === undefined || !Number.isFinite(b) || b === 0 ? null : ((a - b) / b) * 100);
+    const curRate = succRate(cur);
+    const prevRate = succRate(prev);
 
     const hero = h("div", { class: "dash-hero" }, [
       h("div", { class: "hero-block" }, [
         h("div", { class: "hero-label", text: "Requests in range" }),
-        h("div", { class: "hero-figure", text: cur.total.toLocaleString() }),
-        h("div", { class: "hero-note", text: cur.total ? `${cur.ok.toLocaleString()} succeeded · ${cur.failed.toLocaleString()} failed` : "No requests recorded in this range" }),
+        h("div", { class: "hero-figure", text: cur.requests.toLocaleString() }),
+        h("div", { class: "hero-note", text: cur.requests ? `${cur.succeeded.toLocaleString()} succeeded · ${cur.failed.toLocaleString()} failed` : "No requests recorded in this range" }),
       ]),
-      spark(perBucket((rs) => rs.length), tk.s1),
+      spark(col("total"), tk.s1),
     ]);
 
     const tiles = h("div", { class: "stat-row" }, [
       statTile({
         label: "Success rate",
-        value: cur.successRate === null ? "—" : C.pct(cur.successRate, cur.successRate % 1 ? 1 : 0),
-        delta: cur.successRate !== null && prev && prev.successRate !== null ? cur.successRate - prev.successRate : null,
-        deltaText: cur.successRate !== null && prev && prev.successRate !== null ? Math.abs(cur.successRate - prev.successRate).toFixed(1) + " pts" : "",
+        value: curRate === null ? "—" : C.pct(curRate, curRate % 1 ? 1 : 0),
+        delta: curRate !== null && prevRate !== null ? curRate - prevRate : null,
+        deltaText: curRate !== null && prevRate !== null ? Math.abs(curRate - prevRate).toFixed(1) + " pts" : "",
         upIsGood: true,
         note: prev === null ? "no comparable prior window" : undefined,
-        spark: spark(perBucket((rs) => (rs.length ? (rs.filter((r) => r.ok).length / rs.length) * 100 : 0)), tk.s1),
+        spark: spark(M.series.map((b) => b.successRate ?? 0), tk.s1),
       }),
       statTile({
         label: "Median response",
-        value: C.ms(cur.p50),
-        delta: delta(cur.p50 || 0, prev ? prev.p50 : null),
-        deltaText: Math.abs(delta(cur.p50 || 0, prev ? prev.p50 : null) || 0).toFixed(0) + "%",
+        value: C.ms(cur.medianMs),
+        delta: delta(cur.medianMs || 0, prev ? prev.medianMs : null),
+        deltaText: Math.abs(delta(cur.medianMs || 0, prev ? prev.medianMs : null) || 0).toFixed(0) + "%",
         upIsGood: false,
         note: prev === null ? (dataset.source === "server" ? "server processing time" : "client-measured round trip") : undefined,
-        spark: spark(perBucket((rs) => T.agg.percentile(rs.map((r) => r.latencyMs), 0.5) || 0), tk.s1),
+        spark: spark(M.series.map((b) => b.medianMs ?? 0), tk.s1),
       }),
       statTile({
         label: "95th percentile",
-        value: C.ms(cur.p95),
-        delta: delta(cur.p95 || 0, prev ? prev.p95 : null),
-        deltaText: Math.abs(delta(cur.p95 || 0, prev ? prev.p95 : null) || 0).toFixed(0) + "%",
+        value: C.ms(cur.p95Ms),
+        delta: delta(cur.p95Ms || 0, prev ? prev.p95Ms : null),
+        deltaText: Math.abs(delta(cur.p95Ms || 0, prev ? prev.p95Ms : null) || 0).toFixed(0) + "%",
         upIsGood: false,
         note: prev === null ? "slowest 1 in 20 requests" : undefined,
-        spark: spark(perBucket((rs) => T.agg.percentile(rs.map((r) => r.latencyMs), 0.95) || 0), tk.s1),
+        spark: spark(M.series.map((b) => b.p95Ms ?? 0), tk.s1),
       }),
       statTile({
         label: "Model invocations",
-        value: C.compact(cur.llmSteps),
-        delta: delta(cur.llmSteps, prev ? prev.llmSteps : null),
-        deltaText: Math.abs(delta(cur.llmSteps, prev ? prev.llmSteps : null) || 0).toFixed(0) + "%",
+        value: C.compact(cur.modelInvocations),
+        delta: delta(cur.modelInvocations, prev ? prev.modelInvocations : null),
+        deltaText: Math.abs(delta(cur.modelInvocations, prev ? prev.modelInvocations : null) || 0).toFixed(0) + "%",
         upIsGood: true,
         note: prev === null ? "agent steps that really called a model" : undefined,
-        spark: spark(perBucket((rs) => T.agg.steps(rs).filter(isLlmRan).length), tk.s1),
+        spark: spark(col("modelInvocations"), tk.s1),
       }),
       statTile({
         label: "Rows returned",
-        value: C.compact(cur.rows),
-        delta: delta(cur.rows, prev ? prev.rows : null),
-        deltaText: Math.abs(delta(cur.rows, prev ? prev.rows : null) || 0).toFixed(0) + "%",
+        value: C.compact(cur.rowsReturned),
+        delta: delta(cur.rowsReturned, prev ? prev.rowsReturned : null),
+        deltaText: Math.abs(delta(cur.rowsReturned, prev ? prev.rowsReturned : null) || 0).toFixed(0) + "%",
         upIsGood: true,
         note: prev === null ? "across every report section" : undefined,
-        spark: spark(perBucket((rs) => rs.reduce((a, r) => a + (r.rows || 0), 0)), tk.s1),
+        spark: spark(col("rowsReturned"), tk.s1),
       }),
     ]);
 
     return h("div", { class: "dash-top" }, [hero, tiles]);
   }
 
-  function opsSection(recs, buckets, win, tk, w) {
+  function opsSection(M, tk, w) {
+    const win = M.window;
     const span = win.to - win.from;
+    const has = M.totals.requests > 0;
 
     // ── Request volume: succeeded vs failed per bucket. "Failed" is a state, not an identity, so it
     //    wears the critical status color rather than a categorical slot.
-    const volBuckets = buckets.map((b) => ({
-      label: bucketLabel(b.from, span),
-      tipLabel: stamp(b.from),
+    const volBuckets = M.series.map((b) => ({
+      label: bucketLabel(b.t, span),
       segments: [
-        { name: "Succeeded", color: tk.s1, value: b.records.filter((r) => r.ok).length },
-        { name: "Failed", color: tk.critical, value: b.records.filter((r) => !r.ok).length },
+        { name: "Succeeded", color: tk.s1, value: b.ok },
+        { name: "Failed", color: tk.critical, value: b.failed },
       ],
     }));
     const volume = card({
       title: "Request volume",
       subtitle: "Every /v1/ask attempt, bucketed over the selected range",
-      body: recs.length ? C.columns({ width: w, height: 190, buckets: volBuckets }) : null,
+      body: has ? C.columns({ width: w, height: 190, buckets: volBuckets }) : null,
       legend: C.legend([{ name: "Succeeded", color: tk.s1 }, { name: "Failed", color: tk.critical }]),
       empty: "No requests recorded in this range. Ask something in Chat and it appears here.",
       table: () => C.table(
         [{ key: "t", label: "Bucket" }, { key: "ok", label: "Succeeded", num: true }, { key: "failed", label: "Failed", num: true }],
-        buckets.map((b) => ({ t: stamp(b.from), ok: b.records.filter((r) => r.ok).length, failed: b.records.filter((r) => !r.ok).length })),
+        M.series.map((b) => ({ t: stamp(b.t), ok: b.ok, failed: b.failed })),
       ),
     });
 
     // ── Response time: p50 and p95 on ONE axis (both are milliseconds, so they share a scale).
-    const pts = (p) => buckets.map((b) => {
-      const lat = b.records.map((r) => r.latencyMs).filter((v) => v > 0);
-      return { x: b.from, y: lat.length ? T.agg.percentile(lat, p) : null };
-    });
+    //    A bucket with no timed request contributes null, which the line renders as a gap.
+    const pts = (key) => M.series.map((b) => ({ x: b.t, y: b[key] }));
     const latency = card({
       title: "Response time",
       subtitle: latencySubtitle(),
-      body: recs.length
+      body: has
         ? C.line({
             width: w, height: 190,
             series: [
-              { name: "Median", color: tk.s1, points: pts(0.5) },
-              { name: "95th percentile", color: tk.s2, points: pts(0.95) },
+              { name: "Median", color: tk.s1, points: pts("medianMs") },
+              { name: "95th percentile", color: tk.s2, points: pts("p95Ms") },
             ],
             xTicks: [
               { x: win.from, label: bucketLabel(win.from, span) },
@@ -357,45 +343,43 @@
       empty: "No timing samples in this range.",
       table: () => C.table(
         [{ key: "t", label: "Bucket" }, { key: "p50", label: "Median", num: true }, { key: "p95", label: "95th pct", num: true }, { key: "n", label: "Requests", num: true }],
-        buckets.map((b) => {
-          const lat = b.records.map((r) => r.latencyMs).filter((v) => v > 0);
-          return {
-            t: stamp(b.from),
-            p50: lat.length ? C.ms(T.agg.percentile(lat, 0.5)) : "—",
-            p95: lat.length ? C.ms(T.agg.percentile(lat, 0.95)) : "—",
-            n: b.records.length,
-          };
-        }),
+        M.series.map((b) => ({
+          t: stamp(b.t),
+          p50: b.medianMs === null ? "—" : C.ms(b.medianMs),
+          p95: b.p95Ms === null ? "—" : C.ms(b.p95Ms),
+          n: b.total,
+        })),
       ),
     });
 
     // ── Routing: which collaborator the supervisor picked. One series → one color for every bar.
-    const byType = T.agg.countBy(recs.filter((r) => r.ok), (r) => r.type);
     const routing = card({
       title: "Routing by agent type",
       subtitle: "Which collaborator the supervisor selected",
-      body: byType.length ? C.bars({ width: w, items: byType.map((e) => ({ label: e.key, value: e.value })), color: tk.s1, seriesName: "requests" }) : null,
+      body: M.routing.length ? C.bars({ width: w, items: M.routing.map((e) => ({ label: e.type, value: e.n })), color: tk.s1, seriesName: "requests" }) : null,
       empty: "No successful routes in this range.",
-      table: () => C.table([{ key: "key", label: "Agent type" }, { key: "value", label: "Requests", num: true }], byType),
+      table: () => C.table([{ key: "type", label: "Agent type" }, { key: "n", label: "Requests", num: true }], M.routing),
     });
 
-    // ── Engine mix: of the steps that actually ran, how many were a model call vs deterministic
+    // ── Engine mix: of the steps that actually executed, how many were a model call vs deterministic
     //    code vs the HTTP proxy. This is the evidence the path is genuinely agent-driven.
-    const ran = T.agg.steps(recs).filter((st) => st.status !== "skipped");
-    const engineOrder = [
-      { key: "llm", name: "Model call", color: tk.s1 },
-      { key: "deterministic", name: "Deterministic", color: tk.s2 },
-      { key: "proxy", name: "HTTP proxy", color: tk.s3 },
-    ];
-    const engineSegs = engineOrder
-      .map((e) => ({ name: e.name, color: e.color, value: ran.filter((st) => st.engine === e.key).length }))
+    const engineMeta = {
+      llm: { name: "Model call", color: tk.s1 },
+      deterministic: { name: "Deterministic", color: tk.s2 },
+      proxy: { name: "HTTP proxy", color: tk.s3 },
+    };
+    const engineSegs = ["llm", "deterministic", "proxy"]
+      .map((key) => {
+        const found = M.engines.find((e) => e.engine === key);
+        return { name: engineMeta[key].name, color: engineMeta[key].color, value: found ? found.steps : 0 };
+      })
       .filter((sg) => sg.value > 0);
-    const fallbacks = ran.filter((st) => st.status === "fallback").length;
+    const executed = M.stepsExecuted || 0;
     const engineBody = engineSegs.length
       ? h("div", { class: "dash-stack-block" }, [
-          h("div", { class: "dash-stack-total", text: `${ran.length.toLocaleString()} steps executed` }),
+          h("div", { class: "dash-stack-total", text: `${executed.toLocaleString()} steps executed` }),
           C.stack({ width: w, height: 16, segments: engineSegs }),
-          h("div", { class: "dash-stack-note", text: fallbacks ? `${fallbacks} step(s) fell back to deterministic after a model failure.` : "No step fell back to deterministic." }),
+          h("div", { class: "dash-stack-note", text: M.totals.fallbacks ? `${M.totals.fallbacks} step(s) fell back to deterministic after a model failure.` : "No step fell back to deterministic." }),
         ])
       : null;
     const engines = card({
@@ -406,23 +390,14 @@
       empty: "No execution steps recorded in this range.",
       table: () => C.table(
         [{ key: "name", label: "Engine" }, { key: "value", label: "Steps", num: true }, { key: "share", label: "Share", num: true }],
-        engineSegs.map((sg) => ({ name: sg.name, value: sg.value, share: C.pct((sg.value / ran.length) * 100) })),
+        engineSegs.map((sg) => ({ name: sg.name, value: sg.value, share: executed ? C.pct((sg.value / executed) * 100) : "—" })),
       ),
     });
 
     // ── Where the time goes, per pipeline stage.
-    const stageMap = new Map();
-    for (const st of T.agg.steps(recs)) {
-      if (typeof st.latencyMs !== "number") continue;
-      const k = st.stage || "unknown";
-      const cur = stageMap.get(k) || { total: 0, n: 0 };
-      cur.total += st.latencyMs;
-      cur.n += 1;
-      stageMap.set(k, cur);
-    }
-    const stageItems = [...stageMap.entries()]
-      .map(([key, v]) => ({ label: key, value: Math.round(v.total / v.n), note: `${v.n} step(s) · ${C.ms(v.total)} total` }))
-      .sort((a, b) => b.value - a.value);
+    const stageItems = M.stages
+      .filter((st) => typeof st.avgMs === "number")
+      .map((st) => ({ label: st.stage, value: Math.round(st.avgMs), note: `${st.steps} step(s)` }));
     const stages = card({
       title: "Average latency by stage",
       subtitle: "Server-reported step time — route, gateway, dispatch, analytics, report",
@@ -435,23 +410,12 @@
     });
 
     // ── Model usage. Model ids are long identifiers — a table reads them better than any chart.
-    const modelMap = new Map();
-    for (const st of T.agg.steps(recs)) {
-      if (!st.model || st.status === "skipped") continue;
-      const cur = modelMap.get(st.model) || { calls: 0, conf: [], lat: [] };
-      cur.calls += 1;
-      if (typeof st.confidence === "number") cur.conf.push(st.confidence);
-      if (typeof st.latencyMs === "number") cur.lat.push(st.latencyMs);
-      modelMap.set(st.model, cur);
-    }
-    const modelRows = [...modelMap.entries()]
-      .map(([model, v]) => ({
-        model,
-        calls: v.calls,
-        conf: v.conf.length ? C.pct((v.conf.reduce((a, b) => a + b, 0) / v.conf.length) * 100) : "—",
-        lat: v.lat.length ? C.ms(T.agg.percentile(v.lat, 0.5)) : "—",
-      }))
-      .sort((a, b) => b.calls - a.calls);
+    const modelRows = M.models.map((m) => ({
+      model: m.model,
+      calls: m.steps,
+      conf: m.avgConfidence === null ? "—" : C.pct(m.avgConfidence * 100),
+      lat: m.medianMs === null ? "—" : C.ms(m.medianMs),
+    }));
     const models = card({
       title: "Foundation model usage",
       subtitle: "Steps whose engine reported a model id",
@@ -467,30 +431,26 @@
     return [volume, latency, routing, engines, stages, models];
   }
 
-  function backendSection(recs, tk, w) {
-    const sections = T.agg.allSections(recs);
-
-    const rowsByUseCase = T.agg.sumBy(sections, (sec) => sec.useCase, (sec) => sec.rows);
+  function backendSection(M, tk, w) {
     const rowsCard = card({
       title: "Rows returned by use case",
       subtitle: "Volume each backend operation actually produced",
-      body: rowsByUseCase.length ? C.bars({ width: w, items: rowsByUseCase.map((e) => ({ label: e.key, value: e.value })), color: tk.s1, seriesName: "rows" }) : null,
+      body: M.useCases.length
+        ? C.bars({ width: w, items: M.useCases.map((e) => ({ label: e.useCase, value: Number(e.rows) })), color: tk.s1, seriesName: "rows" })
+        : null,
       empty: "No report sections in this range.",
-      table: () => C.table([{ key: "key", label: "Use case" }, { key: "value", label: "Rows", num: true }], rowsByUseCase),
+      table: () => C.table(
+        [{ key: "useCase", label: "Use case" }, { key: "rows", label: "Rows", num: true }, { key: "calls", label: "Calls", num: true }],
+        M.useCases.map((e) => ({ ...e, rows: Number(e.rows) })),
+      ),
     });
 
-    const epMap = new Map();
-    for (const sec of sections) {
-      if (!sec.endpoint) continue;
-      const k = `${sec.httpMethod || "GET"} ${sec.endpoint}`;
-      const cur = epMap.get(k) || { calls: 0, rows: 0, backend: sec.backend };
-      cur.calls += 1;
-      cur.rows += sec.rows;
-      epMap.set(k, cur);
-    }
-    const epRows = [...epMap.entries()]
-      .map(([endpoint, v]) => ({ endpoint, backend: v.backend || "—", calls: v.calls, rows: v.rows }))
-      .sort((a, b) => b.calls - a.calls);
+    const epRows = M.operations.map((o) => ({
+      endpoint: `${o.method || "GET"} ${o.path}`,
+      backend: o.backend || "—",
+      calls: o.calls,
+      rows: Number(o.rows),
+    }));
     const endpoints = card({
       title: "Backend operations called",
       subtitle: "The concrete HTTP operation behind each section",
@@ -505,20 +465,18 @@
     });
 
     // ── Knowledge base (RAG): how often retrieval answered, and from where.
-    const kbRecs = recs.filter((r) => r.kb);
-    const retrievalSegs = [
-      { key: "postgres", name: "pgvector", color: tk.s1 },
-      { key: "memory", name: "In-code corpus", color: tk.s2 },
-    ]
-      .map((e) => ({ name: e.name, color: e.color, value: kbRecs.filter((r) => r.kb.retrieval === e.key).length }))
-      .filter((sg) => sg.value > 0);
-    const matched = kbRecs.map((r) => r.kb.matched).filter((v) => typeof v === "number");
-    const kbBody = kbRecs.length
+    const storeMeta = { postgres: { name: "pgvector", color: tk.s1 }, memory: { name: "In-code corpus", color: tk.s2 } };
+    const retrievalSegs = M.kb.stores.map((st) => ({
+      name: (storeMeta[st.store] && storeMeta[st.store].name) || st.store,
+      color: (storeMeta[st.store] && storeMeta[st.store].color) || tk.s3,
+      value: st.n,
+    }));
+    const kbBody = M.kb.answers
       ? h("div", { class: "dash-stack-block" }, [
           h("div", { class: "dash-kv-row" }, [
-            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: String(kbRecs.length) }), h("span", { class: "kv-k", text: "RAG answers" })]),
-            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: matched.length ? (matched.reduce((a, b) => a + b, 0) / matched.length).toFixed(1) : "—" }), h("span", { class: "kv-k", text: "avg passages" })]),
-            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: C.pct((kbRecs.length / Math.max(1, recs.length)) * 100) }), h("span", { class: "kv-k", text: "of all requests" })]),
+            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: String(M.kb.answers) }), h("span", { class: "kv-k", text: "RAG answers" })]),
+            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: M.kb.avgMatched === null ? "—" : Number(M.kb.avgMatched).toFixed(1) }), h("span", { class: "kv-k", text: "avg passages" })]),
+            h("div", { class: "dash-kv" }, [h("span", { class: "kv-v", text: C.pct((M.kb.answers / Math.max(1, M.totals.requests)) * 100) }), h("span", { class: "kv-k", text: "of all requests" })]),
           ]),
           // A one-segment bar carries no comparison and gets no legend (a single series never does),
           // which would leave the store unnamed — say it in words instead.
@@ -535,23 +493,23 @@
       title: "Knowledge base retrieval",
       subtitle: "Requests answered from the vector store, and which store served them",
       body: kbBody,
-      legend: C.legend(retrievalSegs.map((sg) => ({ name: sg.name, color: sg.color }))),
+      legend: retrievalSegs.length > 1 ? C.legend(retrievalSegs.map((sg) => ({ name: sg.name, color: sg.color }))) : null,
       empty: "No knowledge-base answers in this range.",
     });
 
-    const exports = T.agg.countBy(recs, (r) => r.exportFormat);
-    const uploads = recs.filter((r) => r.hadFile).length;
     // The requested export FORMAT is a browser-side signal (the download happens in the client), so
     // it is absent from server records. Say so rather than letting an empty chart imply zero exports.
+    const formats = M.exports.formats;
+    const uploads = M.exports.uploads;
     const onServer = dataset.source === "server";
     const exportCard = card({
       title: "Export & upload activity",
       subtitle: "Explicit format requests and gateway file submissions",
-      body: exports.length || uploads
+      body: formats.length || uploads
         ? h("div", { class: "dash-stack-block" }, [
-            exports.length ? C.bars({ width: w, items: exports.map((e) => ({ label: e.key.toUpperCase(), value: e.value })), color: tk.s1, seriesName: "exports" }) : null,
+            formats.length ? C.bars({ width: w, items: formats.map((e) => ({ label: String(e.format).toUpperCase(), value: e.n })), color: tk.s1, seriesName: "exports" }) : null,
             h("div", { class: "dash-stack-note", text: `${uploads} request(s) carried a file upload.` }),
-            onServer && !exports.length
+            onServer && !formats.length
               ? h("div", { class: "dash-stack-note", text: "Export formats are recorded by the browser only — switch the source to “This browser” to see them." })
               : null,
           ])
@@ -559,7 +517,7 @@
       empty: onServer
         ? "No uploads in this range. Export formats are recorded by the browser only — switch the source to “This browser” to see them."
         : "No exports or uploads in this range.",
-      table: () => C.table([{ key: "key", label: "Format" }, { key: "value", label: "Requests", num: true }], exports),
+      table: () => C.table([{ key: "format", label: "Format" }, { key: "n", label: "Requests", num: true }], formats),
     });
 
     return [rowsCard, kb, exportCard, endpoints];
@@ -661,9 +619,25 @@
       },
     });
 
+    // Clear only appears once there is a retained verdict — a button that would do nothing is worse
+    // than no button. It discards the stored result and nothing else: no sweep runs, and the server
+    // is untouched, so the card simply returns to its "not run yet" state.
+    const clearBtn = stored && !backtestBusy
+      ? h("button", {
+          class: "btn ghost dash-run", type: "button", text: "Clear results",
+          title: "Discard the retained verdict and return this card to its not-run state",
+          onclick: () => {
+            T.clearBacktest();
+            backtestError = null;
+            render();
+          },
+        })
+      : null;
+
     body.appendChild(h("div", { class: "bt-controls" }, [
       h("label", { class: "bt-mode" }, [h("span", { text: "Mode" }), modeSel]),
       runBtn,
+      clearBtn,
     ]));
 
     if (backtestBusy) {
@@ -730,15 +704,21 @@
     return h("span", { class: "pill pill-" + kind }, [h("span", { class: "pill-glyph", text: glyph }), h("span", { text: label })]);
   }
 
-  function healthSection(recs, tk, w, wideW) {
+  function healthSection(M, tk, w, wideW) {
     const sess = bridge.getSession();
     const endpoint = bridge.getEndpoint();
     let host = endpoint;
     try { host = new URL(endpoint).host; } catch { /* keep the raw string */ }
-    const last = recs.length ? recs[recs.length - 1] : null;
-    const recentFailures = recs.slice(-20).filter((r) => !r.ok).length;
-    const svcKind = !recs.length ? "idle" : recentFailures === 0 ? "good" : recentFailures <= 2 ? "warning" : "critical";
-    const svcLabel = !recs.length ? "No traffic yet" : recentFailures === 0 ? "Healthy" : `${recentFailures} failure(s) in last 20`;
+
+    // Health reads the bounded activity list (newest first), which is a real sample of the most
+    // recent outcomes — not a re-derivation of the window totals.
+    const recent = M.activity.slice(0, 20);
+    const recentFailures = recent.filter((r) => !r.ok).length;
+    const last = M.activity.length ? M.activity[0] : null;
+    const svcKind = !M.totals.requests ? "idle" : recentFailures === 0 ? "good" : recentFailures <= 2 ? "warning" : "critical";
+    const svcLabel = !M.totals.requests
+      ? "No traffic yet"
+      : recentFailures === 0 ? "Healthy" : `${recentFailures} failure(s) in last ${recent.length}`;
 
     const retained = T.all().length;
     const onServer = dataset.source === "server";
@@ -749,7 +729,7 @@
         h("div", { class: "kv-line" }, [h("span", { class: "kv-name", text: "API host" }), h("span", { class: "kv-val mono", text: host, title: endpoint })]),
         h("div", { class: "kv-line" }, [
           h("span", { class: "kv-name", text: "Metrics source" }),
-          h("span", { class: "kv-val", text: onServer ? "Request log (Postgres) — all users" : "This browser's localStorage" }),
+          h("span", { class: "kv-val", text: onServer ? "Request log (Postgres) — aggregated in SQL, all users" : "This browser's localStorage" }),
         ]),
         h("div", { class: "kv-line" }, [h("span", { class: "kv-name", text: "Recent health" }), statusPill(svcKind, svcLabel)]),
         h("div", { class: "kv-line" }, [
@@ -765,21 +745,22 @@
           h("span", { class: "kv-val", text: last ? `${ago(last.ts)} · ${C.ms(last.latencyMs)}` : "—" }),
         ]),
         h("div", { class: "kv-line" }, [
-          h("span", { class: "kv-name", text: onServer ? "Records in view" : "Records retained locally" }),
+          h("span", { class: "kv-name", text: onServer ? "Requests aggregated" : "Records retained locally" }),
           h("span", { class: "kv-val" }, [
-            h("span", { text: onServer ? `${dataset.records.length.toLocaleString()} from the request log` : `${retained} / ${T.MAX_RECORDS}` }),
+            // On the server source this is the whole window, not a fetched page — there is no cap
+            // left to disclose.
+            h("span", { text: onServer ? `${M.totals.requests.toLocaleString()} in this range` : `${retained} / ${T.MAX_RECORDS}` }),
             onServer ? null : C.meter({ width: 120, value: retained, max: T.MAX_RECORDS, color: tk.s1, track: tk.track }),
           ]),
         ]),
       ]),
     });
 
-    const errs = recs.filter((r) => !r.ok).slice(-8).reverse();
     const errors = card({
       title: "Recent failures",
-      subtitle: "Every non-report outcome, newest first",
-      body: errs.length
-        ? h("div", { class: "err-list" }, errs.map((r) =>
+      subtitle: `Most recent ${M.failures.length || ""} non-report outcome(s), newest first`.replace("  ", " "),
+      body: M.failures.length
+        ? h("div", { class: "err-list" }, M.failures.map((r) =>
             h("div", { class: "err-item" }, [
               h("div", { class: "err-item-head" }, [
                 statusPill("critical", r.errorKind || "error"),
@@ -798,8 +779,8 @@
   }
 
   // ---------- Live activity ----------
-  function activityCard(recs) {
-    const rows = recs.slice(-40).reverse();
+  function activityCard(M) {
+    const rows = M.activity;
     if (!rows.length) {
       return card({ title: "Live activity", subtitle: "Most recent requests, newest first", body: null, empty: "Nothing recorded yet — every question you ask in Chat lands here.", span: "wide" });
     }
@@ -816,7 +797,6 @@
           h("th", { class: "num", text: "Steps" }), h("th", { class: "num", text: "Rows" }),
         ].filter(Boolean))),
         h("tbody", {}, rows.map((r) => {
-          const llm = (r.trace || []).filter(isLlmRan).length;
           // A record from another browser (or another user) has no local message to open — don't
           // dress the row as clickable when nothing would happen.
           const linkable = bridge.hasMessage(r.id);
@@ -826,12 +806,12 @@
             ...(linkable ? { onclick: () => bridge.focusMessage(r.id) } : {}),
           }, [
             h("td", { class: "act-time", text: stamp(r.ts) }),
-            showUser ? h("td", { class: "act-user", text: r.userName || r.userRef || "—" }) : null,
+            showUser ? h("td", { class: "act-user", text: r.userName || "—" }) : null,
             h("td", { class: "act-q", text: r.question, title: r.question }),
             h("td", {}, r.type ? h("span", { class: "act-chip", text: r.type }) : h("span", { class: "act-dim", text: "—" })),
             h("td", {}, statusPill(r.ok ? "good" : "critical", r.ok ? "ok" : r.errorKind || "failed")),
             h("td", { class: "num", text: C.ms(r.latencyMs) }),
-            h("td", { class: "num", text: `${(r.trace || []).length}${llm ? ` (${llm} LLM)` : ""}` }),
+            h("td", { class: "num", text: `${r.steps}${r.llmSteps ? ` (${r.llmSteps} LLM)` : ""}` }),
             h("td", { class: "num", text: r.ok ? (r.rows || 0).toLocaleString() : "—" }),
           ].filter(Boolean));
         })),
@@ -846,7 +826,8 @@
   }
 
   // ---------- Filter row ----------
-  function filterRow(win, recs) {
+  function filterRow(M) {
+    const win = M.window;
     const seg = h("div", { class: "seg", role: "group", "aria-label": "Time range" }, T.RANGES.map((r) =>
       h("button", {
         class: "seg-btn" + (r.id === rangeId ? " active" : ""), type: "button", text: r.short,
@@ -870,16 +851,14 @@
     const badge = h("span", {
       class: "src-badge" + (onServer ? " live" : ""),
       title: onServer
-        ? "Aggregated from fedline.request_log — every request this deployment served"
-        : "Aggregated from the responses this browser received",
+        ? "Computed in SQL over every row of fedline.request_log in this range"
+        : "Aggregated in this browser from the responses it received",
       text: onServer ? "Request log · all users" : "This browser only",
     });
 
-    const left = [seg, h("span", { class: "dash-range-note", text: `${recs.length} request(s) · ${stamp(win.from)} → now` })];
-    // Never let a capped read look like a complete picture.
-    if (dataset.truncated) {
-      left.push(h("span", { class: "dash-range-warn", text: "capped at 2,000 records — narrow the range for a complete view" }));
-    }
+    // No truncation caveat any more: the server aggregates the whole window, so this count IS the
+    // count. The local source is bounded by its ring buffer, which the health card states outright.
+    const left = [seg, h("span", { class: "dash-range-note", text: `${M.totals.requests.toLocaleString()} request(s) · ${stamp(win.from)} → now` })];
     if (dataset.note) left.push(h("span", { class: "dash-range-warn", text: dataset.note }));
 
     return h("div", { class: "dash-filters" }, [
@@ -904,11 +883,9 @@
   // ---------- Render ----------
   function render() {
     if (!root || !visible) return;
-    const all = dataset.records;
-    const win = windowOf(all);
-    const recs = T.agg.inWindow(all, win.from, win.to + 1);
-    const prevRecs = win.prevFrom === null ? null : T.agg.inWindow(all, win.prevFrom, win.prevTo);
-    const buckets = T.agg.bucketize(recs, win.from, win.to, win.buckets);
+    // One payload, whichever producer made it. Nothing below re-derives a metric from raw rows.
+    const M = dataset.metrics || T.aggregateLocal([], requestedWindow());
+    const win = M.window;
     const tk = tokens();
 
     // Charts are sized from the live column width — the grid is responsive, so the SVG must be too.
@@ -921,14 +898,9 @@
     // Cards that span the whole grid (validation, activity) get the full inner width.
     const wideW = Math.max(cardW, inner - CARD_PAD);
 
-    const cur = summarize(recs);
-    // An empty prior window is not a baseline of zero — comparing against it would report a
-    // meaningless "+100%". Treat it as no comparison at all.
-    const prev = prevRecs && prevRecs.length ? summarize(prevRecs) : null;
-
     const frag = document.createDocumentFragment();
-    frag.appendChild(filterRow(win, recs));
-    frag.appendChild(heroRow(cur, prev, buckets, tk, cardW));
+    frag.appendChild(filterRow(M));
+    frag.appendChild(heroRow(M, tk, cardW));
 
     const section = (title, note, cards) => {
       frag.appendChild(h("div", { class: "dash-section-head" }, [
@@ -938,10 +910,10 @@
       frag.appendChild(h("div", { class: "dash-grid" }, cards));
     };
 
-    section("Agent operations", "Volume, latency and the execution path the backend actually took", opsSection(recs, buckets, win, tk, cardW));
-    section("Backends & reports", "What the registered applications returned", backendSection(recs, tk, cardW));
-    section("System health & validation", "Endpoint state and the response-validation sweep", healthSection(recs, tk, cardW, wideW));
-    section("Live activity", null, [activityCard(recs)]);
+    section("Agent operations", "Volume, latency and the execution path the backend actually took", opsSection(M, tk, cardW));
+    section("Backends & reports", "What the registered applications returned", backendSection(M, tk, cardW));
+    section("System health & validation", "Endpoint state and the response-validation sweep", healthSection(M, tk, cardW, wideW));
+    section("Live activity", null, [activityCard(M)]);
 
     root.replaceChildren(frag);
   }
@@ -952,7 +924,7 @@
     root = rootEl;
     // Seed from the local store so the very first paint has content; show() then upgrades to the
     // deployment-wide log in the background.
-    dataset = { source: "local", records: T.all(), truncated: false, note: null };
+    dataset = { source: "local", metrics: localMetrics(requestedWindow()), note: null };
     // A new request while the dashboard is open should land immediately. On the server source that
     // means re-reading the log (the row is written asynchronously, so give it a moment to land).
     T.onRecord(() => {
