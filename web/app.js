@@ -739,7 +739,34 @@
    * Extracted from the dialog so the dashboard's validation card can run the SAME sweep and read the
    * same verdict — one code path, one definition of "the backtest".
    */
-  async function fetchBacktest(mode) {
+  /**
+   * The applications the validator can exercise. Same route and same token as the sweep — it is a
+   * cheap, deterministic read, so it uses the plain request timeout rather than the sweep's budget.
+   */
+  async function fetchValidationApps() {
+    if (!session) throw new Error("Sign in first — the validation endpoint requires a session token.");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const res = await fetch(backtestEndpoint(), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer " + session.token },
+        body: JSON.stringify({ action: "applications" }),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = null; }
+      if (!res.ok || !data || !data.ok || !Array.isArray(data.applications)) {
+        throw new Error((data && data.error) || ("HTTP " + res.status + " — " + text.slice(0, 200)));
+      }
+      return data.applications;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchBacktest(mode, backendId) {
     if (!session) throw new Error("Sign in first — the backtest endpoint requires a session token.");
     const controller = new AbortController();
     // Full mode issues one model call per case, so it rides the ALB long-path (same as /v1/ask)
@@ -751,7 +778,7 @@
       const res = await fetch(backtestEndpoint(), {
         method: "POST",
         headers: { "content-type": "application/json", authorization: "Bearer " + session.token },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ mode, backendId }),
         signal: controller.signal,
       });
       const text = await res.text();
@@ -909,7 +936,9 @@
   const bridge = {
     getEndpoint: () => cfg.endpoint,
     getSession: () => session,
-    runBacktest: (mode) => fetchBacktest(mode),
+    runBacktest: (mode, backendId) => fetchBacktest(mode, backendId),
+    /** The applications the validator can exercise, for the Backtest tab's picker. */
+    listValidationApps: () => fetchValidationApps(),
     /**
      * Read the deployment-wide request log (POST /v1/metrics). Resolves to the parsed body; the
      * dashboard decides what to do with `source: "unavailable"`, which is the normal answer on a

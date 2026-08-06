@@ -21,9 +21,20 @@
   let root = null;
   let rangeId = "24h";
   let visible = false;
+  /*
+   * The dashboard has two tabs because it answers two different questions from two different
+   * sources. Telemetry is a time-windowed view of what the system DID (the request log). Backtest is
+   * an on-demand sweep that grades what the backends RETURN — it has no time axis and no relation to
+   * the range or source filters, so those controls only appear on the tab they actually govern.
+   */
+  let dashTab = "telemetry"; // "telemetry" | "backtest"
   let backtestBusy = false;
   let backtestMode = "data"; // "data" (table checks only) | "full" (adds routing + grounding)
   let backtestError = null;
+  /** Which registered application to validate, and the picker's options once fetched. */
+  let backtestApp = null;      // backendId; null until the options land
+  let backtestApps = null;     // [{backendId,name,suite,operations,exercisable}] | null while loading
+  let backtestAppsError = null;
   let resizeTimer = 0;
 
   // ---------- Data source ----------
@@ -556,24 +567,31 @@
     const failed = (c.checks || []).filter((k) => k.status === "fail");
     const skipped = (c.checks || []).filter((k) => k.status === "skip");
     const details = h("details", { class: "bt-case bt-case-" + c.status });
-    // Anything that is not a clean pass opens by default — failures should never need a click to see.
-    if (c.status !== "pass") details.open = true;
+    // Failures open by default — they should never need a click to see. A skipped case has no checks
+    // to reveal, so it stays closed with its reason on the face of it.
+    if (c.status !== "pass" && c.status !== "skip") details.open = true;
 
-    const meta = [
-      c.rowCount + " row" + (c.rowCount === 1 ? "" : "s"),
-      (c.checks || []).length + " checks",
-      failed.length + " failed",
-    ];
+    const meta = c.status === "skip"
+      ? ["not exercised"]
+      : [
+          c.rowCount + " row" + (c.rowCount === 1 ? "" : "s"),
+          (c.checks || []).length + " checks",
+          failed.length + " failed",
+        ];
     if (skipped.length) meta.push(skipped.length + " skipped");
     if (typeof c.latencyMs === "number") meta.push(c.latencyMs + " ms");
 
     details.appendChild(h("summary", { class: "bt-case-head" }, [
-      h("span", { class: "bt-case-status", text: c.status === "pass" ? "PASS" : c.status === "fail" ? "FAIL" : "ERROR" }),
+      h("span", {
+        class: "bt-case-status",
+        text: c.status === "pass" ? "PASS" : c.status === "fail" ? "FAIL" : c.status === "skip" ? "SKIPPED" : "ERROR",
+      }),
       h("span", { class: "bt-case-label", text: c.label || c.operationId }),
       h("code", { class: "bt-case-op", text: c.operationId }),
       h("span", { class: "bt-case-meta", text: meta.join(" · ") }),
     ]));
 
+    if (c.skipReason) details.appendChild(h("div", { class: "bt-skip-reason", text: c.skipReason }));
     if (c.error) details.appendChild(h("div", { class: "bt-case-error", text: c.error }));
     if (c.question && c.question !== "—") {
       details.appendChild(h("div", { class: "bt-case-question", text: "Question: " + c.question }));
@@ -591,25 +609,53 @@
     const stored = T.getBacktest();
     const body = h("div", { class: "dash-stack-block" });
 
-    // ── Controls: mode + run. One filter-style row at the top of the card. ──
-    const modeSel = h("select", { class: "bt-mode-select", "aria-label": "Backtest mode" }, [
+    // ── Controls: application + mode + run. ──
+    const apps = backtestApps || [];
+    const selected = apps.find((a) => a.backendId === backtestApp) || apps[0] || null;
+
+    // A retained verdict belongs to the application that produced it. Rendering it under a different
+    // application's heading would mislabel whose result it is, so it only shows for its own.
+    const showsStored = Boolean(stored && selected && stored.summary.backendId === selected.backendId);
+
+    const appSel = h("select", { class: "bt-mode-select", "aria-label": "Application to validate" },
+      apps.length
+        ? apps.map((a) => h("option", {
+            value: a.backendId,
+            // The option itself states what a sweep of this application can cover, so an all-skipped
+            // result is never a surprise discovered after running it.
+            text: `${a.name} — ${a.exercisable} of ${a.operations} operation(s) exercisable`,
+          }))
+        : [h("option", { value: "", text: backtestAppsError ? "Could not load applications" : "Loading applications…" })],
+    );
+    if (selected) appSel.value = selected.backendId;
+    appSel.disabled = !apps.length || backtestBusy;
+    appSel.addEventListener("change", () => {
+      backtestApp = appSel.value;
+      // The retained verdict belongs to whichever application produced it; switching the picker must
+      // not leave another application's result sitting under the new heading.
+      backtestError = null;
+      render();
+    });
+
+    const modeSel = h("select", { class: "bt-mode-select", "aria-label": "Validation mode" }, [
       h("option", { value: "data", text: "Data — table checks (fast, no model calls)" }),
       h("option", { value: "full", text: "Full — adds routing + grounding (calls the model)" }),
     ]);
     modeSel.value = backtestMode;
+    modeSel.disabled = backtestBusy;
     modeSel.addEventListener("change", () => { backtestMode = modeSel.value === "full" ? "full" : "data"; });
 
     const runBtn = h("button", {
       class: "btn primary dash-run", type: "button",
-      text: backtestBusy ? "Running…" : stored ? "Run again" : "Run validation",
-      disabled: backtestBusy ? "" : null,
+      text: backtestBusy ? "Running…" : showsStored ? "Run again" : "Run validation",
+      disabled: backtestBusy || !selected ? "" : null,
       onclick: async () => {
         if (backtestBusy) return;
         backtestBusy = true;
         backtestError = null;
         render(); // show the running state immediately
         try {
-          await bridge.runBacktest(backtestMode);
+          await bridge.runBacktest(backtestMode, selected ? selected.backendId : undefined);
         } catch (err) {
           backtestError = err && err.message ? err.message : String(err);
         } finally {
@@ -622,7 +668,7 @@
     // Clear only appears once there is a retained verdict — a button that would do nothing is worse
     // than no button. It discards the stored result and nothing else: no sweep runs, and the server
     // is untouched, so the card simply returns to its "not run yet" state.
-    const clearBtn = stored && !backtestBusy
+    const clearBtn = showsStored && !backtestBusy
       ? h("button", {
           class: "btn ghost dash-run", type: "button", text: "Clear results",
           title: "Discard the retained verdict and return this card to its not-run state",
@@ -635,40 +681,62 @@
       : null;
 
     body.appendChild(h("div", { class: "bt-controls" }, [
+      h("label", { class: "bt-mode" }, [h("span", { text: "Application" }), appSel]),
       h("label", { class: "bt-mode" }, [h("span", { text: "Mode" }), modeSel]),
       runBtn,
       clearBtn,
     ]));
+    if (backtestAppsError) {
+      body.appendChild(h("div", { class: "dash-error-line", text: "Could not load applications: " + backtestAppsError }));
+    }
 
     if (backtestBusy) {
       body.appendChild(h("div", {
         class: "dash-stack-note",
         text: backtestMode === "full"
           ? "Running the full sweep — routing and grounding call the model once per case, so this takes a while…"
-          : "Replaying every registered Fedline operation…",
+          : `Replaying ${selected ? selected.name : "the application"}'s registered operations…`,
       }));
     }
     if (backtestError) body.appendChild(h("div", { class: "dash-error-line", text: "Validation failed: " + backtestError }));
 
-    if (!stored) {
+    if (!showsStored) {
       if (!backtestBusy && !backtestError) {
-        body.appendChild(h("div", { class: "dash-empty", text: "No validation run recorded yet. Run one to grade every registered Fedline operation's response table." }));
+        body.appendChild(h("div", {
+          class: "dash-empty",
+          text: stored
+            // A verdict IS retained, just for a different application — say so rather than implying
+            // nothing has ever been run.
+            ? `No validation run recorded for ${selected ? selected.name : "this application"} yet. ` +
+              `(The retained result is for ${stored.summary.backendName || stored.summary.backendId}.)`
+            : "No validation run recorded yet. Run one to grade the selected application's response tables.",
+        }));
       }
-      return card({ title: "Fedline response validation", subtitle: VALIDATION_SUB, body, span: "wide" });
+      return card({ title: "Response validation", subtitle: subtitleFor(selected), body, span: "wide" });
     }
 
     // ── Verdict + counters + the pass meter ──
     const s = stored.summary;
     const t = s.totals || {};
     const passed = Math.max(0, (t.checks || 0) - (t.checksFailed || 0) - (t.checksSkipped || 0));
-    const verdictKind = t.failed || t.errored ? "critical" : t.checksSkipped ? "warning" : "good";
+    const exercised = (t.cases || 0) - (t.skipped || 0);
+    // Nothing exercised is not a pass — it is an absence of evidence, and the verdict must say so
+    // rather than showing a green tick for a sweep that ran no checks.
+    const verdictKind = t.failed || t.errored ? "critical" : !exercised ? "warning" : t.checksSkipped ? "warning" : "good";
+    const verdictText = t.failed || t.errored
+      ? "Failures found"
+      : !exercised ? "Nothing exercised" : "All checks passed";
 
     body.appendChild(h("div", { class: "bt-line" }, [
-      statusPill(verdictKind, t.failed || t.errored ? "Failures found" : "All checks passed"),
-      h("span", { class: "dash-stack-note", text: `${s.backendId} · ${stored.mode} mode · ${t.cases} cases · ${t.checks} checks · ${s.durationMs} ms · ran ${ago(stored.ranAt)}` }),
+      statusPill(verdictKind, verdictText),
+      h("span", { class: "dash-stack-note", text: `${s.backendName || s.backendId} · ${stored.mode} mode · ${t.cases} cases · ${t.checks} checks · ${s.durationMs} ms · ran ${ago(stored.ranAt)}` }),
     ]));
-    body.appendChild(C.meter({ width: w, value: passed, max: Math.max(1, t.checks || 1), color: verdictKind === "good" ? tk.good : tk.warning, track: tk.track }));
-    body.appendChild(h("div", { class: "dash-stack-note", text: `${passed} of ${t.checks || 0} checks passed` }));
+    // No checks means nothing to meter — an empty bar next to "0 of 0" is noise at best and reads as
+    // a full bar at a glance.
+    if (t.checks) {
+      body.appendChild(C.meter({ width: w, value: passed, max: t.checks, color: verdictKind === "good" ? tk.good : tk.warning, track: tk.track }));
+      body.appendChild(h("div", { class: "dash-stack-note", text: `${passed} of ${t.checks} checks passed` }));
+    }
 
     body.appendChild(h("div", { class: "bt-counts" }, [
       countPill("False positives", t.falsePositives || 0, "false_positive"),
@@ -677,6 +745,22 @@
       countPill("Data integrity", t.dataIntegrity || 0, "data_integrity"),
     ]));
 
+    if (t.skipped) {
+      // Case-level skips carry their own reason; surface the count so the coverage is explicit.
+      body.appendChild(h("div", {
+        class: "bt-note",
+        text: `${t.skipped} of ${t.cases} operation(s) were not exercised. Each says why below — a skipped ` +
+          `operation is not a pass, and this sweep makes no claim about it.`,
+      }));
+    }
+    if (s.suite === "registry") {
+      body.appendChild(h("div", {
+        class: "bt-note",
+        text: "Derived from this application's registered operations, so only structural checks are " +
+          "possible (the call succeeded; every row carries the same columns). Column, rollup and " +
+          "parameter-echo expectations exist only for applications with an authored suite.",
+      }));
+    }
     if (t.checksSkipped) {
       // A skipped check is NOT a pass — say so, or the headline overstates the result.
       body.appendChild(h("div", {
@@ -693,10 +777,16 @@
       .forEach((c) => cases.appendChild(renderCase(c)));
     if (cases.childNodes.length) body.appendChild(cases);
 
-    return card({ title: "Fedline response validation", subtitle: VALIDATION_SUB, body, span: "wide" });
+    return card({ title: "Response validation", subtitle: subtitleFor(selected), body, span: "wide" });
   }
 
-  const VALIDATION_SUB = "Replays every registered Fedline operation and classifies false positives, false negatives, hallucinated figures and table-integrity failures";
+  /** The card's subtitle states what the SELECTED application's sweep actually asserts. */
+  function subtitleFor(app) {
+    if (!app) return "Replay a registered application's operations and grade what they return";
+    return app.suite === "authored"
+      ? `Replays every registered ${app.name} operation and classifies false positives, false negatives, hallucinated figures and table-integrity failures`
+      : `Replays ${app.name}'s safe, parameterless operations and checks the response structure — no authored table expectations exist for this application`;
+  }
 
   function statusPill(kind, label) {
     // Status colors always ship with a glyph + label, so meaning never rests on hue alone.
@@ -704,7 +794,7 @@
     return h("span", { class: "pill pill-" + kind }, [h("span", { class: "pill-glyph", text: glyph }), h("span", { text: label })]);
   }
 
-  function healthSection(M, tk, w, wideW) {
+  function healthSection(M, tk, w) {
     const sess = bridge.getSession();
     const endpoint = bridge.getEndpoint();
     let host = endpoint;
@@ -774,8 +864,9 @@
       empty: "No failures in this range.",
     });
 
-    // The validation card spans the grid: it carries a full per-case report, not a summary tile.
-    return [service, errors, validationCard(tk, wideW)];
+    // Validation lives on its own tab now — it is a sweep the operator triggers, not a passive
+    // reading of what already happened.
+    return [service, errors];
   }
 
   // ---------- Live activity ----------
@@ -823,6 +914,51 @@
       body,
       span: "wide",
     });
+  }
+
+  /** Load the picker's options once. Never throws — the card shows the reason and stays usable. */
+  let appsLoading = false;
+  async function loadValidationApps() {
+    if (appsLoading) return;
+    appsLoading = true;
+    try {
+      const apps = await bridge.listValidationApps();
+      backtestApps = Array.isArray(apps) ? apps : [];
+      if (!backtestApp && backtestApps.length) backtestApp = backtestApps[0].backendId;
+      backtestAppsError = null;
+    } catch (err) {
+      backtestApps = [];
+      backtestAppsError = err && err.message ? err.message : String(err);
+    } finally {
+      appsLoading = false;
+      render();
+    }
+  }
+
+  // ---------- Tabs ----------
+  /**
+   * Page-level tabs, styled as underlined tabs rather than as another `.seg` control: the segmented
+   * controls in the filter row scope the data, these switch what the page IS. Same look would imply
+   * same kind of choice.
+   */
+  const TABS = [
+    { id: "telemetry", label: "Telemetry", hint: "What the system did — volume, latency, execution path, backends, health" },
+    { id: "backtest", label: "Backtest", hint: "Fedline response validation — grade every registered operation's response" },
+  ];
+
+  function tabBar() {
+    return h("div", { class: "dash-tabs", role: "tablist", "aria-label": "Dashboard section" }, TABS.map((t) =>
+      h("button", {
+        class: "dash-tab" + (t.id === dashTab ? " active" : ""),
+        type: "button", role: "tab", "aria-selected": String(t.id === dashTab),
+        text: t.label, title: t.hint,
+        onclick: () => {
+          if (dashTab === t.id) return;
+          dashTab = t.id;
+          render();
+        },
+      }),
+    ));
   }
 
   // ---------- Filter row ----------
@@ -899,8 +1035,7 @@
     const wideW = Math.max(cardW, inner - CARD_PAD);
 
     const frag = document.createDocumentFragment();
-    frag.appendChild(filterRow(M));
-    frag.appendChild(heroRow(M, tk, cardW));
+    frag.appendChild(tabBar());
 
     const section = (title, note, cards) => {
       frag.appendChild(h("div", { class: "dash-section-head" }, [
@@ -910,10 +1045,21 @@
       frag.appendChild(h("div", { class: "dash-grid" }, cards));
     };
 
-    section("Agent operations", "Volume, latency and the execution path the backend actually took", opsSection(M, tk, cardW));
-    section("Backends & reports", "What the registered applications returned", backendSection(M, tk, cardW));
-    section("System health & validation", "Endpoint state and the response-validation sweep", healthSection(M, tk, cardW, wideW));
-    section("Live activity", null, [activityCard(M)]);
+    if (dashTab === "backtest") {
+      // Fetched once, lazily: the picker's options are only needed on this tab, and they do not
+      // change between renders.
+      if (backtestApps === null && !backtestAppsError) loadValidationApps();
+      // No filter row here: the sweep is on-demand and has no time axis, so a range or source
+      // control on this tab would be a knob that governs nothing.
+      frag.appendChild(h("div", { class: "dash-grid" }, [validationCard(tk, wideW)]));
+    } else {
+      frag.appendChild(filterRow(M));
+      frag.appendChild(heroRow(M, tk, cardW));
+      section("Agent operations", "Volume, latency and the execution path the backend actually took", opsSection(M, tk, cardW));
+      section("Backends & reports", "What the registered applications returned", backendSection(M, tk, cardW));
+      section("System health", "Endpoint state, session and recent failures", healthSection(M, tk, cardW));
+      section("Live activity", null, [activityCard(M)]);
+    }
 
     root.replaceChildren(frag);
   }

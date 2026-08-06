@@ -75,9 +75,18 @@ ask to confirm the format on open; **PDF** uses the browser's print-to-PDF (a pr
 ## Operations dashboard
 
 The **left panel is the navigation**: **Dashboard** and **Chatbot**, plus New chat and Settings.
-Exactly one view occupies the main column at a time. The dashboard is an operations view over the
-requests the system actually served — volume and latency, the execution path each request took,
-what the backends returned, service health, and a live activity feed.
+Exactly one view occupies the main column at a time.
+
+The Dashboard itself has two tabs, because it answers two different questions from two different
+sources:
+
+| Tab | Question | Source |
+|-----|----------|--------|
+| **Telemetry** | What did the system *do*? Volume, latency, execution path, backend output, health, live activity. | The request log — time-windowed |
+| **Backtest** | What does a chosen application *return*? The response-validation sweep. | An on-demand run of `POST /v1/backtest` |
+
+The range and source filters live on **Telemetry** only. The sweep has no time axis and no relation
+to them, so putting those controls on the Backtest tab would be a knob that governs nothing.
 
 **Every number is an observation, never an estimate.** Where something was not observed the
 card says so instead of drawing a zero, and a value that is only reachable by hovering does
@@ -121,7 +130,7 @@ Two measurements differ by source and are labelled accordingly: the browser reco
 whole **round trip**, the server records its own **processing time**. The requested export format
 is a browser-side signal only — the download happens in the client.
 
-### Sections
+### Telemetry tab — sections
 
 - **Hero + KPIs** — requests in range, success rate, median/p95 response, model invocations,
   rows returned, each with a delta against the immediately preceding window of equal length
@@ -131,39 +140,43 @@ is a browser-side signal only — the download happens in the client.
   foundation-model usage.
 - **Backends & reports** — rows by use case, the concrete HTTP operations called, knowledge-base
   retrieval and its store, export/upload activity.
-- **System health & validation** — endpoint and session state, recent failures, and the **Fedline
-  response validation** sweep. The sweep runs here (`POST /v1/backtest`) rather than in a modal:
-  pick `data` (table checks only, no model calls) or `full` (adds routing + grounding, one model
-  call per case), and the card shows the verdict, the four failure classes it counts, and the full
-  per-case check report — failing cases open first, skips called out as *not* passes.
+- **System health** — endpoint and session state, and recent failures.
 - **Live activity** — the most recent requests; a row whose exchange is still in this browser's
   chat opens it and highlights it.
 
-## Features
+### Backtest tab
 
-- Multiline input: **Enter** sends, **Shift+Enter** newline; the box auto-grows.
-- Example prompts on the welcome screen to get started fast (the sidebar is navigation).
-- Live "typing…" indicator with an elapsed-seconds counter (the agent path can take 10–30s).
-- Graceful handling of timeouts and errors (the backend may return a fast *local* result if
-  the multi-agent path exceeds API Gateway's 30s cap — see the backend notes).
-- Per-section render of `meta.endpoint` / `httpMethod` and any `endpointMissingParams`, so you
-  can see exactly which backend REST call each use case maps to.
-- New chat (returns you to the chat view), sidebar toggle, light/dark (follows your OS theme).
+**Response validation** — replay a registered application's operations and grade what they return.
+Run on demand (`POST /v1/backtest`) rather than from a modal.
 
-## Files
+Pick the **Application** to validate. Each option states how much of it a sweep can actually cover
+(`Fedline — 18 of 18 operation(s) exercisable`), so an all-skipped result is never a surprise
+discovered after running it. Then pick the **Mode**: `data` (table checks only, no model calls) or
+`full` (adds routing + grounding, one model call per case).
 
-| File | Purpose |
-|------|---------|
-| `index.html` | Markup: sidebar nav, chat area, composer, dashboard mount, settings dialog |
-| `styles.css` | Chat styling + the backtest result styles the dashboard renders (light/dark via `prefers-color-scheme`) |
-| `app.js` | Chat state, API calls (with abort/timeout), flexible `FinalReport` rendering, view switching |
-| `telemetry.js` | Local telemetry store (capped ring buffer) + the aggregation helpers both sources share |
-| `charts.js` | Dependency-free SVG chart primitives (line, columns, bars, stack, sparkline, meter) |
-| `dashboard.js` | The dashboard view: data source, cards, and the four sections |
-| `dashboard.css` | Dashboard layout + the validated chart palette (see the note at the top of the file) |
+Two kinds of suite, and the card always says which it ran:
 
-All seven files are copied into the nginx image by the `Dockerfile` — adding one there is not
-optional, since `index.html` loads them by name.
+| Suite | Applies to | What it asserts |
+|-------|-----------|-----------------|
+| **authored** | Fedline | Realistic parameters and real table expectations — required columns, numeric columns, rollups that must reconcile, parameters echoed back, plus an operation-coverage assertion |
+| **registry** | every other registered application | Only what a registration document can justify: the call succeeded, and every row carries the same columns |
+
+An operation is **not exercised** — reported as `SKIPPED` with its reason, never as a pass — when:
+
+- its method is not GET/HEAD. A sweep must never fire a POST/PUT/PATCH/DELETE at a registered
+  application: submitting to an endpoint is a side effect, not a test. (This is why SCP, whose only
+  operation is `POST submitEasySim`, reports *Nothing exercised* rather than a green tick.)
+- its required parameters have no authored values. Calling with placeholders would test the
+  fixture, not the backend.
+
+`src/__tests__/registry-cases.test.ts` pins both rules.
+
+**Run again** repeats the sweep; **Clear results** discards the retained verdict and returns the
+card to its not-run state — no sweep runs and nothing on the server is touched. Clear only appears
+once there is a result to clear. A verdict belongs to the application that produced it: switching
+the picker never shows one application's result under another's heading. The verdict is retained
+across tab switches and reloads, because a `full` sweep costs one model call per case and should
+not be re-run just to look at it again.
 
 ### Chart colours
 

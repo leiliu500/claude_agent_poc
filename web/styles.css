@@ -470,6 +470,12 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
 .bt-case-head::-webkit-details-marker { display: none; }
 .bt-case-status { font-size: 11px; font-weight: 700; letter-spacing: .05em; padding: 3px 7px; border-radius: 6px; background: rgba(26,127,75,.14); color: var(--viz-good-ink); }
 .bt-case-fail .bt-case-status, .bt-case-error .bt-case-status { background: rgba(179,38,30,.14); color: var(--viz-critical-ink); }
+/* A skipped case is neither a pass nor a failure — it wears the neutral/soft treatment so it can
+   never be mistaken for either at a glance. */
+.bt-case-skip { border-style: dashed; }
+.bt-case-skip .bt-case-status { background: var(--bg-soft); color: var(--text-soft); }
+.bt-case-skip .bt-case-label { color: var(--text-soft); font-weight: 550; }
+.bt-skip-reason { color: var(--text-soft); font-size: 12px; padding: 0 12px 10px; line-height: 1.45; }
 .bt-case-label { font-weight: 600; }
 .bt-case-op { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
 .bt-case-meta { margin-left: auto; font-size: 11px; color: var(--text-soft); }

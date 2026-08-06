@@ -110,6 +110,33 @@
   background: var(--bg-soft);
   padding: 20px 24px 48px;
 }
+/* ---------- Dashboard tabs ---------- */
+/* Underlined tabs, deliberately NOT the `.seg` pill used in the filter row: those scope the data,
+   these switch what the page is. Identical styling would imply an identical kind of choice. */
+.dash-tabs {
+  display: flex; gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin: -4px 0 16px;
+}
+.dash-tab {
+  position: relative;
+  padding: 9px 14px 11px;
+  border: 0; background: transparent;
+  color: var(--text-soft);
+  font-size: 13.5px; font-weight: 550;
+  border-radius: 8px 8px 0 0;
+}
+.dash-tab:hover { color: var(--text); background: var(--bg); }
+.dash-tab.active { color: var(--text); font-weight: 650; }
+/* The active marker sits ON the section border so the tab reads as joined to the panel below. */
+.dash-tab.active::after {
+  content: "";
+  position: absolute; left: 10px; right: 10px; bottom: -1px;
+  height: 2px; border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+.dash-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 .dash-section-head {
   display: flex; align-items: baseline; gap: 12px;
   margin: 30px 2px 12px;
@@ -387,11 +414,11 @@
 .dash-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .dash-run { padding: 7px 14px; font-size: 12.5px; flex: none; }
 .dash-run[disabled] { opacity: .6; cursor: default; }
-/* The per-case report can be long; keep the card from swallowing the page. */
-.dash-card .bt-cases { max-height: 520px; overflow-y: auto; }
-/* .bt-cases is a flex column, so a max-height makes its children SHRINK to fit instead of the
-   container scrolling — and .bt-case sets overflow:hidden, which then clips each case into an
-   unreadable bar. flex:none keeps every case at its natural height so the list actually scrolls. */
+/* The per-case report owns the whole Backtest tab, so it scrolls with the PAGE rather than inside
+   its own box — an inner scrollbar on an otherwise empty page hides how long the report is.
+   flex:none is still required: .bt-cases is a flex column, so any height constraint on an ancestor
+   would shrink the cases instead of overflowing, and .bt-case sets overflow:hidden — which clips
+   each one into an unreadable bar. */
 .dash-card .bt-cases > .bt-case { flex: none; }
 
 /* ---------- Failures ---------- */

@@ -50,13 +50,20 @@ export interface CaseResult {
   label: string;
   /** The natural-language question used for the routing check. */
   question: string;
-  status: "pass" | "fail" | "error";
+  /**
+   * "skip" means the case was NOT exercised — never a pass. It is used when an operation cannot be
+   * validated safely or meaningfully (e.g. a non-GET operation the sweep must not fire, or one whose
+   * required parameters have no authored values), and `skipReason` always says which.
+   */
+  status: "pass" | "fail" | "error" | "skip";
   rowCount: number;
   columns: string[];
   latencyMs: number;
   checks: CheckResult[];
   /** Set when the case threw before any check could run. */
   error?: string;
+  /** Why the case was not exercised. Present exactly when status === "skip". */
+  skipReason?: string;
 }
 
 /**
@@ -71,6 +78,8 @@ export interface BacktestTotals {
   passed: number;
   failed: number;
   errored: number;
+  /** Cases that were not exercised at all. Counted separately so they can never read as passes. */
+  skipped: number;
   checks: number;
   checksPassed: number;
   checksFailed: number;
@@ -83,6 +92,16 @@ export interface BacktestTotals {
 
 export interface BacktestSummary {
   backendId: string;
+  /** Human name of the application, for the UI heading. */
+  backendName?: string;
+  /**
+   * How the cases were obtained:
+   *   · "authored" — a hand-written suite with realistic params and table expectations (Fedline);
+   *   · "registry" — derived from the application's registered operations, so only the structural
+   *     checks the spec can justify are possible. The UI must say which, because an all-green
+   *     registry sweep proves far less than an all-green authored one.
+   */
+  suite?: "authored" | "registry";
   mode: BacktestMode;
   startedAt: string;
   durationMs: number;
