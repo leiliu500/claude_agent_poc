@@ -72,21 +72,86 @@ Notes: exports are generated client-side from the structured report (no backend 
 CSV is UTF-8 with a BOM (opens cleanly in Excel); **Excel** is an `.xls` (HTML table) — Excel may
 ask to confirm the format on open; **PDF** uses the browser's print-to-PDF (a print dialog opens).
 
+## Operations dashboard
+
+The **left panel is the navigation**: **Dashboard** and **Chatbot**, plus New chat and Settings.
+Exactly one view occupies the main column at a time. The dashboard is an operations view over the
+requests the system actually served — volume and latency, the execution path each request took,
+what the backends returned, service health, and a live activity feed.
+
+**Every number is an observation, never an estimate.** Where something was not observed the
+card says so instead of drawing a zero, and a value that is only reachable by hovering does
+not exist — every chart ships a **Table** toggle showing the same data.
+
+### Two sources, one shape
+
+| Source | What it covers | Where it lives |
+|--------|----------------|----------------|
+| **Deployment** (default) | Every request this deployment served, for all users | `fedline.request_log`, read via `POST /v1/metrics` |
+| **This browser** | Only the requests this browser made | `localStorage` (capped ring buffer, 300 records) |
+
+Both record the identical record shape, so one aggregation layer serves both. The dashboard
+prefers the server log and falls back to the local store — silently in behaviour, never in
+labelling: the badge in the filter row always names the source actually in use, and a
+capped read is flagged rather than presented as complete.
+
+The server source needs `enable_database = true` (the request log is a Postgres table and the
+`/v1/metrics` route is only created with it). Without it the dashboard runs on local data alone.
+
+Two measurements differ by source and are labelled accordingly: the browser records the
+caller's whole **round trip**, the server records its own **processing time**. The requested
+export format is a browser-side signal only — the download happens in the client.
+
+### Sections
+
+- **Hero + KPIs** — requests in range, success rate, median/p95 response, model invocations,
+  rows returned, each with a delta against the immediately preceding window of equal length
+  (omitted, not faked, when there is no comparable prior window).
+- **Agent operations** — request volume, response time, routing by agent type, execution
+  engine mix (model call vs deterministic vs HTTP proxy), latency by pipeline stage, and
+  foundation-model usage.
+- **Backends & reports** — rows by use case, the concrete HTTP operations called, knowledge-base
+  retrieval and its store, export/upload activity.
+- **System health & validation** — endpoint and session state, recent failures, and the **Fedline
+  response validation** sweep. The sweep runs here (`POST /v1/backtest`) rather than in a modal:
+  pick `data` (table checks only, no model calls) or `full` (adds routing + grounding, one model
+  call per case), and the card shows the verdict, the four failure classes it counts, and the full
+  per-case check report — failing cases open first, skips called out as *not* passes.
+- **Live activity** — the most recent requests; a row whose exchange is still in this browser's
+  chat opens it and highlights it.
+
 ## Features
 
 - Multiline input: **Enter** sends, **Shift+Enter** newline; the box auto-grows.
-- Example prompts in the sidebar / welcome screen to get started fast.
+- Example prompts on the welcome screen to get started fast (the sidebar is navigation).
 - Live "typing…" indicator with an elapsed-seconds counter (the agent path can take 10–30s).
 - Graceful handling of timeouts and errors (the backend may return a fast *local* result if
   the multi-agent path exceeds API Gateway's 30s cap — see the backend notes).
 - Per-section render of `meta.endpoint` / `httpMethod` and any `endpointMissingParams`, so you
   can see exactly which backend REST call each use case maps to.
-- New chat, sidebar toggle, light/dark (follows your OS theme).
+- New chat (returns you to the chat view), sidebar toggle, light/dark (follows your OS theme).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `index.html` | Markup: sidebar, chat area, composer, settings dialog |
-| `styles.css` | All styling (light/dark via `prefers-color-scheme`) |
-| `app.js` | Chat state, API call (with abort/timeout), flexible `FinalReport` rendering |
+| `index.html` | Markup: sidebar nav, chat area, composer, dashboard mount, settings dialog |
+| `styles.css` | Chat styling + the backtest result styles the dashboard renders (light/dark via `prefers-color-scheme`) |
+| `app.js` | Chat state, API calls (with abort/timeout), flexible `FinalReport` rendering, view switching |
+| `telemetry.js` | Local telemetry store (capped ring buffer) + the aggregation helpers both sources share |
+| `charts.js` | Dependency-free SVG chart primitives (line, columns, bars, stack, sparkline, meter) |
+| `dashboard.js` | The dashboard view: data source, cards, and the four sections |
+| `dashboard.css` | Dashboard layout + the validated chart palette (see the note at the top of the file) |
+
+All seven files are copied into the nginx image by the `Dockerfile` — adding one there is not
+optional, since `index.html` loads them by name.
+
+### Chart colours
+
+The three categorical slots in `dashboard.css` are a **validated** set, not a taste call: they
+were checked on all pairs against this app's real chart surfaces (`#ffffff` light, `#1f1f1f`
+dark) for colour-vision separation, lightness band, chroma and contrast. The header comment in
+that file records the measured numbers. A fourth categorical hue breaks the all-pairs floors —
+fold a fourth class into "Other" rather than adding one. Status colours (good / warning /
+serious / critical) are reserved for state, never used as a series colour, and always ship with
+a glyph and a word so meaning never rests on hue alone.

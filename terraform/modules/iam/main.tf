@@ -72,6 +72,18 @@ data "aws_iam_policy_document" "entrypoint_bedrock" {
       "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:inference-profile/*"
     ]
   }
+
+  # The entrypoint invokes two sibling Lambdas directly, both because they are VPC-attached and it is
+  # not:
+  #   1. action-gateway (GATEWAY_FN) — file-upload submits, so the file bytes never enter the LLM.
+  #   2. telemetry (TELEMETRY_FN)    — async append to the request log behind the dashboard.
+  # Scoped to this deployment's own function-name prefix, not lambda:* account-wide.
+  statement {
+    sid       = "InvokeSiblingLambdas"
+    effect    = "Allow"
+    actions   = ["lambda:InvokeFunction"]
+    resources = ["arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${var.name_prefix}-*"]
+  }
 }
 
 resource "aws_iam_role_policy" "entrypoint_bedrock" {

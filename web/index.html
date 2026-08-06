@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Agentic Application Gateway</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="dashboard.css" />
   </head>
   <body>
     <!-- Login gate: shown until a valid session exists; the app is hidden behind it. -->
@@ -32,14 +33,20 @@
       <!-- Sidebar -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
-          <button class="new-chat" id="newChat" title="New chat">
+          <button class="new-chat" id="newChat" title="Start a new conversation">
             <span class="plus">+</span> New chat
           </button>
         </div>
-        <div class="sidebar-section">
-          <div class="sidebar-label">Examples</div>
-          <ul class="examples" id="examples"></ul>
-        </div>
+        <!-- Primary navigation. The two views own the main column; exactly one is mounted at a time. -->
+        <nav class="side-nav" id="sideNav" role="tablist" aria-label="View">
+          <button type="button" id="navDashboard" class="side-nav-item" role="tab" aria-selected="false">
+            <span class="nav-glyph" aria-hidden="true">📈</span><span>Dashboard</span>
+          </button>
+          <button type="button" id="navChat" class="side-nav-item active" role="tab" aria-selected="true">
+            <span class="nav-glyph" aria-hidden="true">💬</span><span>Chatbot</span>
+          </button>
+        </nav>
+        <div class="sidebar-spacer"></div>
         <div class="sidebar-foot">
           <button class="settings-btn" id="settingsBtn" title="Settings">⚙ Settings</button>
         </div>
@@ -57,10 +64,9 @@
                width and the title (flex:1, min-width:0) is what truncates when space runs out.
                Previously the labelled Backtest button reused .icon-btn, a fixed 34x34 square, so its
                text overflowed the box and sat on top of the title and status. -->
+          <!-- The response-validation sweep lives in the Dashboard (System health & validation), not
+               here: it is an operations concern and its results belong beside the other health cards. -->
           <div class="topbar-actions">
-            <button class="topbar-btn" id="backtestBtn" title="Validate every Fedline response table">
-              <span aria-hidden="true">🧪</span><span class="btn-label">Backtest</span>
-            </button>
             <div class="status" id="connStatus" title="API endpoint">…</div>
             <div class="user-box" id="userBox" hidden>
               <span class="user-name" id="userName" title="Signed in"></span>
@@ -80,7 +86,7 @@
           <div class="messages" id="messages" aria-live="polite"></div>
         </section>
 
-        <footer class="composer">
+        <footer class="composer" id="composer">
           <form class="composer-form" id="composerForm">
             <!-- Attachment bar: shown only when a file is attached (e.g. an SCP EASy XML upload). -->
             <div class="attach-bar" id="attachBar" hidden>
@@ -120,6 +126,10 @@
             The agent path can take 10–30s; if it exceeds the limit the backend returns a fast local result.
           </div>
       </footer>
+
+        <!-- Dashboard view. Hidden until the topbar switch selects it; the chat section and the
+             composer are hidden while it is shown, so only one view occupies the main column. -->
+        <section class="dashboard" id="dashboardView" hidden></section>
       </main>
     </div>
 
@@ -143,33 +153,10 @@
       </form>
     </dialog>
 
-    <!--
-      Fedline backtest dialog. Replays every registered Fedline operation through the real dispatch
-      path and reports the three failure modes the validation suite classifies: false positives,
-      false negatives and hallucinated figures, plus self-contradicting table data.
-    -->
-    <dialog id="backtestDialog" class="backtest-dialog">
-      <div class="backtest-content">
-        <header class="backtest-head">
-          <h2>Fedline response validation</h2>
-          <div class="backtest-controls">
-            <label class="backtest-mode">
-              <span>Mode</span>
-              <select id="backtestMode">
-                <option value="data">Data — table checks (fast, no model calls)</option>
-                <option value="full">Full — adds routing + grounding (calls the model)</option>
-              </select>
-            </label>
-            <button type="button" class="btn primary" id="backtestRun">Run backtest</button>
-            <button type="button" class="btn ghost" id="backtestClose">Close</button>
-          </div>
-        </header>
-        <div class="backtest-body" id="backtestBody">
-          <p class="backtest-empty">Run the backtest to validate every Fedline operation's response table.</p>
-        </div>
-      </div>
-    </dialog>
-
+    <!-- Load order matters: app.js reads Telemetry/Dashboard off window during init. -->
+    <script src="telemetry.js"></script>
+    <script src="charts.js"></script>
+    <script src="dashboard.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

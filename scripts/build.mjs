@@ -32,6 +32,9 @@ const LAMBDAS = [
   { name: "analytics", entry: "src/lambdas/analytics/handler.ts" },
   { name: "report", entry: "src/lambdas/report/handler.ts" },
   { name: "flow-process", entry: "src/lambdas/flow-process/handler.ts" },
+  // Durable request log behind the operations dashboard: async writes from the entrypoint +
+  // the POST /v1/metrics read route. In-VPC, so it needs the bundled pg driver like the rest.
+  { name: "telemetry", entry: "src/lambdas/telemetry/handler.ts" },
   // One-off migration Lambda: bundles db/schema.sql (copied in below) and applies it in-VPC.
   { name: "db-migrate", entry: "src/lambdas/db-migrate/handler.ts", assets: [["db/schema.sql", "schema.sql"]] },
 ];

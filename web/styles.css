@@ -72,17 +72,8 @@ button { font-family: inherit; cursor: pointer; }
 }
 .new-chat:hover { background: var(--bg-soft); }
 .new-chat .plus { font-size: 18px; line-height: 1; }
-.sidebar-section { padding: 8px 12px; overflow-y: auto; flex: 1; }
-.sidebar-label {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--text-soft); margin: 8px 4px;
-}
-.examples { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.examples li {
-  padding: 9px 10px; border-radius: 8px; font-size: 13px; color: var(--text-soft);
-  cursor: pointer; line-height: 1.35;
-}
-.examples li:hover { background: var(--bg-soft); color: var(--text); }
+/* The sidebar is navigation (see .side-nav in dashboard.css). The example prompts that used to fill
+   it read as chat history, which they never were — they live on the welcome screen only. */
 .sidebar-foot { padding: 12px; border-top: 1px solid var(--border); }
 .settings-btn {
   width: 100%; text-align: left; padding: 9px 10px; border: none; background: transparent;
@@ -241,6 +232,10 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
 
 /* Attachment bar (file upload for gateway ops, e.g. SCP EASy files) */
 .attach-bar { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 2px; }
+/* The bar is shown only while a file is staged, and app.js toggles that with the `hidden`
+   attribute — but an author `display` rule beats the UA sheet's [hidden] rule, so without this the
+   empty chip and the payload box sat in the composer permanently. */
+.attach-bar[hidden] { display: none; }
 .attach-chip {
   display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
   background: var(--panel, rgba(127,127,127,.12)); border: 1px solid var(--border);
@@ -451,24 +446,9 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
   background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.4;
 }
 .topbar-btn:hover { background: var(--bg-soft); border-color: var(--accent); }
-.backtest-dialog { border: none; border-radius: 14px; padding: 0; box-shadow: var(--shadow); width: min(940px, 94vw); max-height: 88vh; color: var(--text); background: var(--bg); }
-.backtest-dialog::backdrop { background: rgba(0,0,0,.45); }
-.backtest-content { display: flex; flex-direction: column; max-height: 88vh; }
-.backtest-head { padding: 18px 22px 14px; border-bottom: 1px solid var(--border); }
-.backtest-head h2 { margin: 0 0 12px; font-size: 18px; }
-.backtest-controls { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
-.backtest-mode { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-soft); flex: 1 1 320px; }
-.backtest-mode select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-soft); color: var(--text); font-size: 13px; }
-.backtest-body { padding: 16px 22px 22px; overflow-y: auto; }
-.backtest-empty { color: var(--text-soft); font-size: 13px; margin: 6px 0; }
-.bt-error { color: var(--danger); font-size: 13px; margin: 6px 0; }
-
-.bt-headline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-.bt-verdict { font-size: 13px; font-weight: 700; letter-spacing: .04em; padding: 5px 10px; border-radius: 7px; }
-.bt-verdict-pass { color: var(--ok); background: rgba(26,127,75,.12); }
-.bt-verdict-fail { color: var(--danger); background: rgba(179,38,30,.12); }
-.bt-headline-meta { font-size: 12px; color: var(--text-soft); }
-
+/* The backtest is no longer a modal — it is a card in the Dashboard (System health & validation),
+   so the dialog chrome and its own verdict headline are gone. The result styles below are still
+   used, now rendered by dashboard.js. */
 .bt-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .bt-count { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-soft); }
 .bt-count-value { font-size: 22px; font-weight: 700; line-height: 1.1; }
@@ -488,27 +468,27 @@ pre.raw { background: var(--code-bg); border-radius: 8px; padding: 12px; overflo
 .bt-case-error { border-color: var(--danger); }
 .bt-case-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; cursor: pointer; font-size: 13px; }
 .bt-case-head::-webkit-details-marker { display: none; }
-.bt-case-status { font-size: 11px; font-weight: 700; letter-spacing: .05em; padding: 3px 7px; border-radius: 6px; background: rgba(26,127,75,.14); color: var(--ok); }
-.bt-case-fail .bt-case-status, .bt-case-error .bt-case-status { background: rgba(179,38,30,.14); color: var(--danger); }
+.bt-case-status { font-size: 11px; font-weight: 700; letter-spacing: .05em; padding: 3px 7px; border-radius: 6px; background: rgba(26,127,75,.14); color: var(--viz-good-ink); }
+.bt-case-fail .bt-case-status, .bt-case-error .bt-case-status { background: rgba(179,38,30,.14); color: var(--viz-critical-ink); }
 .bt-case-label { font-weight: 600; }
 .bt-case-op { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-soft); background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px; }
 .bt-case-meta { margin-left: auto; font-size: 11px; color: var(--text-soft); }
 .bt-case-question { font-size: 12px; color: var(--text-soft); padding: 0 12px 8px; }
-.bt-case > .bt-case-error { color: var(--danger); font-size: 12px; padding: 0 12px 10px; }
+.bt-case > .bt-case-error { color: var(--viz-critical-ink); font-size: 12px; padding: 0 12px 10px; }
 
 .bt-check-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
 .bt-check { display: flex; gap: 9px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .bt-check:last-child { border-bottom: none; }
 .bt-check-status { width: 14px; flex: none; text-align: center; font-weight: 700; }
-.bt-check-pass .bt-check-status { color: var(--ok); }
-.bt-check-fail .bt-check-status { color: var(--danger); }
+.bt-check-pass .bt-check-status { color: var(--viz-good-ink); }
+.bt-check-fail .bt-check-status { color: var(--viz-critical-ink); }
 .bt-check-skip .bt-check-status { color: var(--text-soft); }
 .bt-check-skip { opacity: .75; }
 .bt-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .bt-check-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-soft); }
 .bt-check-detail { color: var(--text); overflow-wrap: anywhere; }
 .bt-kind { align-self: flex-start; margin-top: 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 2px 6px; border-radius: 5px; }
-.bt-kind.bt-false_positive { background: rgba(179,38,30,.14); color: #b3261e; }
-.bt-kind.bt-false_negative { background: rgba(176,111,0,.16); color: #b06f00; }
-.bt-kind.bt-hallucination  { background: rgba(139,63,196,.16); color: #8b3fc4; }
-.bt-kind.bt-data_integrity { background: rgba(74,144,217,.16); color: #4a90d9; }
+.bt-kind.bt-false_positive { background: rgba(179,38,30,.14); color: var(--kind-false-positive); }
+.bt-kind.bt-false_negative { background: rgba(176,111,0,.16); color: var(--kind-false-negative); }
+.bt-kind.bt-hallucination  { background: rgba(139,63,196,.16); color: var(--kind-hallucination); }
+.bt-kind.bt-data_integrity { background: rgba(74,144,217,.16); color: var(--kind-data-integrity); }

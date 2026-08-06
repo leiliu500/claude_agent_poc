@@ -479,7 +479,128 @@ ON CONFLICT (user_id, id_type) DO UPDATE
     SET id_value = EXCLUDED.id_value,
         label    = EXCLUDED.label;
 
+-- ============================================================================
+-- Request log — durable telemetry behind the operations dashboard
+-- ============================================================================
+-- One row per /v1/ask attempt, written by the telemetry Lambda (the API entrypoint
+-- invokes it asynchronously; the entrypoint itself has no VPC attachment and so no
+-- route to this database).
+--
+-- Every column is an OBSERVATION of a real request: the outcome the caller saw, the
+-- wall-clock the caller waited, and the execution path the backend recorded. Nothing
+-- is derived or estimated here — the dashboard aggregates these rows, so a value that
+-- was not observed stays NULL rather than defaulting to zero.
+--
+-- The three JSONB columns mirror the shapes in src/shared/types.ts:
+--   trace    -> AgentStep[]        (stage, agent, engine, status, model, confidence, latencyMs)
+--   sections -> per-section digest (useCase, rows, endpoint, httpMethod, backend)
+--   kb       -> RAG provenance     (retrieval, matched, citations)
+-- They are stored whole rather than normalised into child tables: they are read back
+-- as a unit by exactly one consumer (the dashboard) and never joined or filtered on.
+CREATE TABLE IF NOT EXISTS fedline.request_log (
+    request_id    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- API Gateway request id, so a dashboard row can be matched to its CloudWatch logs.
+    trace_id      TEXT,
+    -- The authenticated caller. Text, not an FK: the log must survive a user being deleted,
+    -- and an unauthenticated (local-dev) request legitimately has no user at all.
+    user_ref      TEXT,
+    user_name     TEXT,
+    question      TEXT        NOT NULL DEFAULT '',
+    ok            BOOLEAN     NOT NULL,
+    http_status   INT,
+    latency_ms    INT         NOT NULL DEFAULT 0,
+    report_type   TEXT,                    -- FinalReport.type; NULL when the request failed
+    report_id     TEXT,
+    orchestrated  BOOLEAN,
+    rows_returned INT         NOT NULL DEFAULT 0,
+    had_file      BOOLEAN     NOT NULL DEFAULT false,
+    export_format TEXT,
+    error         TEXT,
+    error_kind    TEXT,                    -- http | network | timeout | auth
+    trace         JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    sections      JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    kb            JSONB
+);
+
+-- The dashboard always reads a time window, newest first — this index serves every query it makes.
+CREATE INDEX IF NOT EXISTS request_log_occurred_idx
+    ON fedline.request_log (occurred_at DESC);
+-- Per-user views ("my activity") stay index-served as the table grows.
+CREATE INDEX IF NOT EXISTS request_log_user_occurred_idx
+    ON fedline.request_log (user_ref, occurred_at DESC);
+
+-- Append one observation. All-defaults arguments keep the call site tolerant of a partial
+-- record (a network failure, for instance, has no http_status and no report).
+CREATE OR REPLACE FUNCTION fedline.log_request(
+    p_trace_id      TEXT,
+    p_user_ref      TEXT,
+    p_user_name     TEXT,
+    p_question      TEXT,
+    p_ok            BOOLEAN,
+    p_http_status   INT,
+    p_latency_ms    INT,
+    p_report_type   TEXT,
+    p_report_id     TEXT,
+    p_orchestrated  BOOLEAN,
+    p_rows_returned INT,
+    p_had_file      BOOLEAN,
+    p_export_format TEXT,
+    p_error         TEXT,
+    p_error_kind    TEXT,
+    p_trace         JSONB,
+    p_sections      JSONB,
+    p_kb            JSONB
+) RETURNS BIGINT
+LANGUAGE sql
+AS $$
+    INSERT INTO fedline.request_log (
+        trace_id, user_ref, user_name, question, ok, http_status, latency_ms,
+        report_type, report_id, orchestrated, rows_returned, had_file, export_format,
+        error, error_kind, trace, sections, kb
+    ) VALUES (
+        p_trace_id, p_user_ref, p_user_name, COALESCE(p_question, ''), p_ok, p_http_status,
+        COALESCE(p_latency_ms, 0), p_report_type, p_report_id, p_orchestrated,
+        COALESCE(p_rows_returned, 0), COALESCE(p_had_file, false), p_export_format,
+        p_error, p_error_kind,
+        COALESCE(p_trace, '[]'::jsonb), COALESCE(p_sections, '[]'::jsonb), p_kb
+    )
+    RETURNING request_id;
+$$;
+
+-- Read a window of observations, newest first. The dashboard aggregates client-side over the
+-- SAME record shape it builds locally, so one aggregation layer serves both sources.
+-- p_user_ref NULL ⇒ every user (the deployment-wide view).
+CREATE OR REPLACE FUNCTION fedline.read_request_log(
+    p_from     TIMESTAMPTZ,
+    p_to       TIMESTAMPTZ,
+    p_limit    INT DEFAULT 1000,
+    p_user_ref TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+    request_id BIGINT, occurred_at TIMESTAMPTZ, trace_id TEXT, user_ref TEXT, user_name TEXT,
+    question TEXT, ok BOOLEAN, http_status INT, latency_ms INT, report_type TEXT, report_id TEXT,
+    orchestrated BOOLEAN, rows_returned INT, had_file BOOLEAN, export_format TEXT,
+    error TEXT, error_kind TEXT, trace JSONB, sections JSONB, kb JSONB
+)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT rl.request_id, rl.occurred_at, rl.trace_id, rl.user_ref, rl.user_name,
+           rl.question, rl.ok, rl.http_status, rl.latency_ms, rl.report_type, rl.report_id,
+           rl.orchestrated, rl.rows_returned, rl.had_file, rl.export_format,
+           rl.error, rl.error_kind, rl.trace, rl.sections, rl.kb
+    FROM   fedline.request_log rl
+    WHERE  rl.occurred_at >= p_from
+    AND    rl.occurred_at <  p_to
+    AND    (p_user_ref IS NULL OR rl.user_ref = p_user_ref)
+    ORDER  BY rl.occurred_at DESC
+    LIMIT  GREATEST(1, LEAST(COALESCE(p_limit, 1000), 5000));
+$$;
+
 -- ── Smoke checks (uncomment to verify after load) ────────────────────────────
 -- SELECT fedline.get_user_id('Lei Liu');                 -- -> a user_id
 -- SELECT fedline.get_user_id('Nobody');                  -- -> NULL (unknown)
 -- SELECT fedline.get_user_identifiers('lei liu');        -- -> { "abaNumber": "000001", ... }
+-- SELECT count(*) FROM fedline.request_log;              -- -> observations recorded so far
+-- SELECT * FROM fedline.read_request_log(now() - interval '24 hours', now(), 50);

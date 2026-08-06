@@ -7,11 +7,13 @@
 #   docker push "$REPO:latest"
 #   aws ecs update-service --cluster bedrock-reporting-dev-web --service bedrock-reporting-dev-web --force-new-deployment --region us-gov-west-1
 #
-# Only the three UI files are copied (no README/Dockerfile/etc.), so the image is tiny and clean.
+# Only the UI files are copied (no README/Dockerfile/etc.), so the image is tiny and clean.
 FROM nginx:1.27-alpine
 
-# Static UI files.
+# Static UI files. telemetry/charts/dashboard back the Dashboard view and MUST be listed here —
+# index.html loads them by name, and a missing file leaves the view blank with a 404 in the console.
 COPY web/index.html web/app.js web/styles.css /usr/share/nginx/html/
+COPY web/telemetry.js web/charts.js web/dashboard.js web/dashboard.css /usr/share/nginx/html/
 
 # Site config as a TEMPLATE: the nginx image entrypoint renders /etc/nginx/templates/*.template with
 # envsubst at container start, injecting ${API_BASE_URL} (the current API Gateway URL, set on the ECS
