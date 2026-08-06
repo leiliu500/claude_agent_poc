@@ -6,6 +6,15 @@
 #   (re-zip source) → aws s3 cp source.zip s3://<web_build_source_bucket>/source.zip
 #   → aws codebuild start-build --project-name bedrock-reporting-dev-web-build
 #   → aws ecs update-service --cluster bedrock-reporting-dev-web --service bedrock-reporting-dev-web --force-new-deployment
+#
+# ZIPPING THE SOURCE ON WINDOWS: do NOT use PowerShell's Compress-Archive. It writes entry paths with
+# BACKSLASHES, so CodeBuild extracts literal files named `web\index.html` instead of a `web/`
+# directory — the Dockerfile is still found (it is top-level) but the build context arrives empty and
+# every `COPY web/...` fails with "not found". Use a zipper that emits POSIX separators, e.g.:
+#   python -c "import zipfile,os; src=r'<repo>'; \
+#     files=['Dockerfile']+['web/'+f for f in sorted(os.listdir(os.path.join(src,'web')))]; \
+#     z=zipfile.ZipFile('source.zip','w',zipfile.ZIP_DEFLATED); \
+#     [z.write(os.path.join(src,r.replace('/',os.sep)),r) for r in files]; z.close()"
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_s3_bucket" "web_build" {

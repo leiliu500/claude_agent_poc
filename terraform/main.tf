@@ -29,6 +29,13 @@ locals {
   # synthetic responses instead of making outbound calls (useful before real backends are reachable
   # from the VPC — the DB subnets have no NAT). Off in real deploys so the proxy actually calls apps.
   gateway_lambda_env = var.gateway_mock ? { GATEWAY_MOCK = "true" } : {}
+
+  # Durable request log (the operations dashboard's server-side source) lives in Postgres, so the
+  # entrypoint only emits telemetry when there is a database to write it to. Without this the
+  # dashboard still works — it falls back to the browser's local store.
+  telemetry_entrypoint_env = var.enable_database ? {
+    TELEMETRY_FN = module.lambda_workers.function_names["telemetry"]
+  } : {}
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -103,6 +110,20 @@ module "lambda_workers" {
       timeout                = 300
       memory_size            = 512
       description            = "S3-triggered: chunk + Bedrock-embed documents and upsert into the pgvector knowledge store."
+    }
+    # ── Request log behind the operations dashboard. Two jobs, one function, because both need the
+    #    same VPC attachment: async writes invoked by the entrypoint, and the POST /v1/metrics read
+    #    route. Harmless with the DB disabled — it then reports source "unavailable" and writes
+    #    nothing (and the entrypoint isn't given TELEMETRY_FN, so it never calls it). ──
+    "telemetry" = {
+      zip_path               = "${var.dist_dir}/telemetry.zip"
+      role_arn               = var.enable_database ? module.iam.lambda_db_role_arn : module.iam.lambda_basic_role_arn
+      environment            = merge({ LOG_LEVEL = var.log_level }, local.db_lambda_env)
+      vpc_subnet_ids         = local.db_subnet_ids
+      vpc_security_group_ids = local.db_sg_ids
+      timeout                = 30
+      memory_size            = 512
+      description            = "Request log: async writes from the entrypoint + POST /v1/metrics reads for the dashboard."
     }
     "dispatch" = {
       zip_path    = "${var.dist_dir}/dispatch.zip"
@@ -242,7 +263,7 @@ module "lambda_entrypoint" {
       role_arn = module.iam.lambda_entrypoint_role_arn
       # In the best-practice topology the supervisor agent is a node INSIDE the flow,
       # so the entrypoint only needs to invoke the flow.
-      environment = {
+      environment = merge(local.telemetry_entrypoint_env, {
         LOG_LEVEL          = var.log_level
         ORCHESTRATION_MODE = var.orchestration_mode
         BEDROCK_REGION     = local.region
@@ -272,7 +293,7 @@ module "lambda_entrypoint" {
         GATEWAY_AGENT_TIMEOUT_MS      = "20000"
         POSTDISPATCH_BUDGET_MS        = "45000"
         POSTDISPATCH_AGENT_TIMEOUT_MS = "20000"
-      }
+      })
       timeout     = 120
       memory_size = var.lambda_memory_mb
       description = "API entrypoint (Function URL + API Gateway): invokes the supervisor→analytics→report flow."
@@ -295,6 +316,14 @@ module "api_gateway" {
   login_function_name      = module.lambda_workers.function_names["auth-login"]
   authorizer_invoke_arn    = module.lambda_workers.invoke_arns["auth-authorizer"]
   authorizer_function_name = module.lambda_workers.function_names["auth-authorizer"]
+
+  # Operations dashboard read route. Only wired with a database — there is no request log otherwise,
+  # and a route that always answers "unavailable" is worse than no route (the UI probes for it).
+  # The flag is what gates the route; the ARNs are only its values (a Lambda attribute is unknown
+  # until apply, and a `count` on an unknown value fails at plan time).
+  telemetry_enabled       = var.enable_database
+  telemetry_invoke_arn    = module.lambda_workers.invoke_arns["telemetry"]
+  telemetry_function_name = module.lambda_workers.function_names["telemetry"]
 
   tags = local.common_tags
 }

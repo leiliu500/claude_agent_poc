@@ -82,6 +82,10 @@
   const userBox = $("userBox");
   const userNameEl = $("userName");
   const logoutBtn = $("logoutBtn");
+  const dashboardView = $("dashboardView");
+  const composerEl = $("composer");
+  const navChat = $("navChat");
+  const navDashboard = $("navDashboard");
 
   let busy = false;
   let attached = null; // { name, contentBase64 } — a file staged for a gateway upload (e.g. SCP)
@@ -120,11 +124,11 @@
   }
 
   // ---------- Examples / chips ----------
+  // Examples live on the welcome screen only. The sidebar is navigation now — a scrolling list of
+  // prompts there read as chat history, which it never was.
   function buildExamples() {
-    const list = $("examples");
     const chips = $("welcomeChips");
     EXAMPLES.forEach((ex) => {
-      list.appendChild(el("li", { text: ex, title: ex, onclick: () => useExample(ex) }));
       chips.appendChild(el("button", { class: "chip", type: "button", text: ex, onclick: () => useExample(ex) }));
     });
   }
@@ -173,6 +177,9 @@
     }, 500);
 
     return {
+      // Exposed so send() can tag the message with its telemetry id — that tag is what lets a
+      // dashboard activity row jump back to the exchange that produced it.
+      node,
       setContent(child) {
         clearInterval(timer);
         content.innerHTML = "";
@@ -586,14 +593,35 @@
 
     const ph = addAssistantPlaceholder();
 
+    // Telemetry is recorded on EVERY outcome — success, server error, timeout, network failure — so
+    // the dashboard's success rate is a real denominator and not just the happy path. The values
+    // come from this exchange only; nothing is estimated. `started` measures the round trip the user
+    // actually waited for.
+    const started = Date.now();
+    const track = (o) => {
+      if (!window.Telemetry) return;
+      try {
+        const rec = window.Telemetry.record({
+          question,
+          latencyMs: Date.now() - started,
+          hadFile: Boolean(fileToSend),
+          exportFormat: detectFormat(question) || undefined,
+          ...o,
+        });
+        ph.node.dataset.rec = rec.id;
+      } catch { /* telemetry must never break the chat */ }
+    };
+
     try {
       const { httpStatus, data } = await callApi(question, fileToSend, payloadToSend);
 
       if (httpStatus === 401 || httpStatus === 403) {
         // Token rejected by the authorizer (expired/invalid) — drop the session and re-gate.
+        track({ httpStatus, error: "Session expired or token rejected.", errorKind: "auth", traceId: data && data.traceId });
         ph.setContent(renderError("Session expired", "Please sign in again to continue."));
         endSession("Your session has expired. Please sign in again.");
       } else if (data && data.ok && data.report) {
+        track({ httpStatus, report: data.report, traceId: data.traceId });
         const node = renderReport(data.report);
         // If the user asked for a specific format, return it in that format (download/print),
         // while still showing the table preview by default.
@@ -608,14 +636,21 @@
         history.push({ role: "assistant", report: data.report });
         if (fmt && EXPORTERS[fmt]) setTimeout(() => EXPORTERS[fmt](data.report), 120);
       } else if (data && data.error) {
+        track({ httpStatus, error: data.error, errorKind: "http", traceId: data.traceId });
         ph.setContent(renderError("Request failed", data.error + (data.traceId ? `  (trace ${data.traceId})` : "")));
       } else if (data && data._raw !== undefined) {
+        track({ httpStatus, error: String(data._raw).slice(0, 300), errorKind: "http" });
         ph.setContent(renderError(`Unexpected response (HTTP ${httpStatus})`, String(data._raw).slice(0, 600)));
       } else {
+        track({ httpStatus, error: JSON.stringify(data).slice(0, 300), errorKind: "http" });
         ph.setContent(renderError(`Unexpected response (HTTP ${httpStatus})`, JSON.stringify(data).slice(0, 600)));
       }
     } catch (err) {
       const aborted = err && err.name === "AbortError";
+      track({
+        error: aborted ? `No response within ${cfg.timeoutSec}s.` : String(err && err.message ? err.message : err),
+        errorKind: aborted ? "timeout" : "network",
+      });
       ph.setContent(renderError(
         aborted ? "Timed out" : "Network error",
         aborted
@@ -679,11 +714,14 @@
   });
 
   // ---------- New chat ----------
+  // Also switches back to the chat view: starting a conversation from the Dashboard should land you
+  // where you can type it.
   $("newChat").addEventListener("click", () => {
     messagesEl.innerHTML = "";
     history.length = 0;
     welcomeEl.classList.remove("hidden");
     inputEl.value = "";
+    setView("chat");
     autosize();
     inputEl.focus();
   });
@@ -691,130 +729,18 @@
   // ---------- Sidebar toggle ----------
   $("sidebarToggle").addEventListener("click", () => $("sidebar").classList.toggle("collapsed"));
 
-  // ---------- Fedline backtest ----------
-  // Replays every registered Fedline operation through the backend's real dispatch path and renders
-  // the validation verdict per case. The four counters map 1:1 to the failure kinds the server
-  // classifies (see shared/backtest/types.ts) so nothing is re-derived or re-labelled here.
-  const backtestDialog = $("backtestDialog");
-  const backtestBody = $("backtestBody");
-  let backtestBusy = false;
-
+  // ---------- Fedline backtest (transport only) ----------
+  // The sweep is PRESENTED in the Dashboard (System health & validation); this module only owns
+  // the call, because it is the only place holding the endpoint config and the session token.
   const backtestEndpoint = () => cfg.endpoint.replace(/\/v1\/ask\b.*$/, "/v1/backtest");
 
-  function countPill(label, value, kind) {
-    return el("div", { class: "bt-count" + (value > 0 ? " bt-count-hit bt-" + kind : "") }, [
-      el("div", { class: "bt-count-value", text: String(value) }),
-      el("div", { class: "bt-count-label", text: label }),
-    ]);
-  }
-
-  function renderCheck(check) {
-    const status = check.status || "pass";
-    const row = el("div", { class: "bt-check bt-check-" + status });
-    row.appendChild(el("span", { class: "bt-check-status", text: status === "pass" ? "✓" : status === "skip" ? "–" : "✕" }));
-    const text = el("div", { class: "bt-check-text" }, [
-      el("div", { class: "bt-check-id", text: check.id }),
-      el("div", { class: "bt-check-detail", text: check.detail || "" }),
-    ]);
-    if (check.failureKind) {
-      text.appendChild(el("span", { class: "bt-kind bt-" + check.failureKind, text: check.failureKind.replace(/_/g, " ") }));
-    }
-    row.appendChild(text);
-    return row;
-  }
-
-  function renderCase(c) {
-    const failed = (c.checks || []).filter((k) => k.status === "fail");
-    const skipped = (c.checks || []).filter((k) => k.status === "skip");
-    const details = el("details", { class: "bt-case bt-case-" + c.status });
-    // Anything that is not a clean pass opens by default — failures should never need a click to see.
-    if (c.status !== "pass") details.open = true;
-
-    const meta = [
-      c.rowCount + " row" + (c.rowCount === 1 ? "" : "s"),
-      (c.checks || []).length + " checks",
-      failed.length + " failed",
-    ];
-    if (skipped.length) meta.push(skipped.length + " skipped");
-    if (typeof c.latencyMs === "number") meta.push(c.latencyMs + " ms");
-
-    details.appendChild(el("summary", { class: "bt-case-head" }, [
-      el("span", { class: "bt-case-status", text: c.status === "pass" ? "PASS" : c.status === "fail" ? "FAIL" : "ERROR" }),
-      el("span", { class: "bt-case-label", text: c.label || c.operationId }),
-      el("code", { class: "bt-case-op", text: c.operationId }),
-      el("span", { class: "bt-case-meta", text: meta.join(" · ") }),
-    ]));
-
-    if (c.error) details.appendChild(el("div", { class: "bt-case-error", text: c.error }));
-    if (c.question && c.question !== "—") {
-      details.appendChild(el("div", { class: "bt-case-question", text: "Question: " + c.question }));
-    }
-    const list = el("div", { class: "bt-check-list" });
-    // Failures first, then skips, then passes — the reading order that matters.
-    []
-      .concat(failed, skipped, (c.checks || []).filter((k) => k.status === "pass"))
-      .forEach((k) => list.appendChild(renderCheck(k)));
-    details.appendChild(list);
-    return details;
-  }
-
-  function renderBacktest(summary) {
-    const t = summary.totals || {};
-    const wrap = el("div", { class: "bt-result" });
-
-    wrap.appendChild(el("div", { class: "bt-headline" }, [
-      el("span", {
-        class: "bt-verdict " + (t.failed || t.errored ? "bt-verdict-fail" : "bt-verdict-pass"),
-        text: t.failed || t.errored ? "FAILURES FOUND" : "ALL CHECKS PASSED",
-      }),
-      el("span", {
-        class: "bt-headline-meta",
-        text:
-          summary.backendId + " · " + summary.mode + " mode · " + t.cases + " cases · " +
-          t.checks + " checks · " + summary.durationMs + " ms",
-      }),
-    ]));
-
-    wrap.appendChild(el("div", { class: "bt-counts" }, [
-      countPill("False positives", t.falsePositives || 0, "false_positive"),
-      countPill("False negatives", t.falseNegatives || 0, "false_negative"),
-      countPill("Hallucinations", t.hallucinations || 0, "hallucination"),
-      countPill("Data integrity", t.dataIntegrity || 0, "data_integrity"),
-    ]));
-
-    if (t.checksSkipped) {
-      wrap.appendChild(el("div", {
-        class: "bt-note",
-        text: t.checksSkipped + " check(s) skipped — a skipped check was not exercised and is not a pass. " +
-          (summary.mode === "data" ? "Run 'full' mode to exercise routing and grounding." : "Their preconditions were unavailable on this deployment."),
-      }));
-    }
-
-    const cases = el("div", { class: "bt-cases" });
-    // Failing cases float to the top; passes keep registry order below them.
-    []
-      .concat((summary.cases || []).filter((c) => c.status !== "pass"), (summary.cases || []).filter((c) => c.status === "pass"))
-      .forEach((c) => cases.appendChild(renderCase(c)));
-    wrap.appendChild(cases);
-    return wrap;
-  }
-
-  async function runBacktest() {
-    if (backtestBusy) return;
-    if (!session) {
-      backtestBody.replaceChildren(el("p", { class: "bt-error", text: "Sign in first — the backtest endpoint requires a session token." }));
-      return;
-    }
-    backtestBusy = true;
-    const mode = $("backtestMode").value === "full" ? "full" : "data";
-    $("backtestRun").disabled = true;
-    backtestBody.replaceChildren(el("p", {
-      class: "backtest-empty",
-      text: mode === "full"
-        ? "Running full backtest — routing and grounding call the model, this can take a while…"
-        : "Running table-data backtest…",
-    }));
-
+  /**
+   * Call POST /v1/backtest and return the summary, or throw with a readable reason.
+   * Extracted from the dialog so the dashboard's validation card can run the SAME sweep and read the
+   * same verdict — one code path, one definition of "the backtest".
+   */
+  async function fetchBacktest(mode) {
+    if (!session) throw new Error("Sign in first — the backtest endpoint requires a session token.");
     const controller = new AbortController();
     // Full mode issues one model call per case, so it rides the ALB long-path (same as /v1/ask)
     // rather than API Gateway's 30s cap. Clamp to 125s: the ALB idle timeout is 130s and the Lambda
@@ -832,28 +758,22 @@
       let data;
       try { data = JSON.parse(text); } catch { data = null; }
       if (!res.ok || !data || !data.ok || !data.summary) {
-        const msg = (data && data.error) || ("HTTP " + res.status + " — " + text.slice(0, 300));
-        backtestBody.replaceChildren(el("p", { class: "bt-error", text: "Backtest failed: " + msg }));
-      } else {
-        backtestBody.replaceChildren(renderBacktest(data.summary));
+        throw new Error((data && data.error) || ("HTTP " + res.status + " — " + text.slice(0, 300)));
       }
+      // Retained so the dashboard can show the last verdict with its age instead of re-running a
+      // sweep (full mode costs one model call per case) every time the view is opened.
+      if (window.Telemetry) window.Telemetry.setBacktest(data.summary, mode);
+      return data.summary;
     } catch (err) {
-      backtestBody.replaceChildren(el("p", {
-        class: "bt-error",
-        text: err && err.name === "AbortError"
-          ? "Backtest timed out after " + budgetSec + "s. Try 'data' mode, or raise the timeout in Settings."
-          : "Backtest failed: " + (err && err.message ? err.message : String(err)),
-      }));
+      if (err && err.name === "AbortError") {
+        throw new Error(`Backtest timed out after ${budgetSec}s. Try 'data' mode, or raise the timeout in Settings.`);
+      }
+      throw err;
     } finally {
       clearTimeout(timer);
-      backtestBusy = false;
-      $("backtestRun").disabled = false;
     }
   }
 
-  $("backtestBtn").addEventListener("click", () => backtestDialog.showModal());
-  $("backtestClose").addEventListener("click", () => backtestDialog.close());
-  $("backtestRun").addEventListener("click", runBacktest);
 
   // ---------- Settings ----------
   const dialog = $("settingsDialog");
@@ -917,6 +837,8 @@
     messagesEl.innerHTML = "";
     history.length = 0;
     welcomeEl.classList.remove("hidden");
+    // A signed-out tab must not sit on the dashboard behind the login gate.
+    setView("chat");
     loginError.hidden = true;
     if (message) { loginHint.textContent = message; }
     showLogin();
@@ -957,10 +879,85 @@
   });
   logoutBtn.addEventListener("click", () => endSession());
 
+  // ---------- View switching (Chat ⇄ Dashboard) ----------
+  // Both views share the main column; exactly one is mounted at a time. The dashboard is only ever
+  // rendered while visible, so an offscreen re-render can't fight the chat for layout.
+  function setView(view) {
+    const dash = view === "dashboard";
+    chatEl.hidden = dash;
+    composerEl.hidden = dash;
+    dashboardView.hidden = !dash;
+    navChat.classList.toggle("active", !dash);
+    navDashboard.classList.toggle("active", dash);
+    navChat.setAttribute("aria-selected", String(!dash));
+    navDashboard.setAttribute("aria-selected", String(dash));
+    if (dash) {
+      // show() renders, and rendering measures the container — so unhide first (done above).
+      window.Dashboard.show();
+    } else {
+      window.Dashboard.hide();
+      inputEl.focus();
+    }
+  }
+  navChat.addEventListener("click", () => setView("chat"));
+  navDashboard.addEventListener("click", () => setView("dashboard"));
+
+  /**
+   * The only surface the dashboard uses to reach the app. Keeping it to these five calls means the
+   * dashboard never touches the session token, the endpoint config or the chat DOM directly.
+   */
+  const bridge = {
+    getEndpoint: () => cfg.endpoint,
+    getSession: () => session,
+    runBacktest: (mode) => fetchBacktest(mode),
+    /**
+     * Read the deployment-wide request log (POST /v1/metrics). Resolves to the parsed body; the
+     * dashboard decides what to do with `source: "unavailable"`, which is the normal answer on a
+     * deployment without a database rather than an error.
+     */
+    async fetchMetrics(body) {
+      if (!session) throw new Error("Not signed in.");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const res = await fetch(cfg.endpoint.replace(/\/v1\/ask\b.*$/, "/v1/metrics"), {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer " + session.token },
+          body: JSON.stringify(body || {}),
+          signal: controller.signal,
+        });
+        // A deployment without the route answers 404 — treat that as "no server source", not a fault.
+        if (res.status === 404) return { ok: true, source: "unavailable", records: [] };
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = null; }
+        if (!res.ok || !data) throw new Error((data && data.error) || `HTTP ${res.status}`);
+        return data;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    /** True when this browser's chat still holds the exchange behind a telemetry record. */
+    hasMessage: (recordId) => Boolean(messagesEl.querySelector(`[data-rec="${CSS.escape(recordId)}"]`)),
+    /** Jump from an activity row back to the chat exchange that produced it. */
+    focusMessage(recordId) {
+      const node = messagesEl.querySelector(`[data-rec="${CSS.escape(recordId)}"]`);
+      if (!node) return; // a record from another browser/session has no message to jump to
+      setView("chat");
+      node.scrollIntoView({ block: "center", behavior: "smooth" });
+      node.classList.remove("flash");
+      // Reflow between removal and re-add so the highlight replays on a repeat click.
+      void node.offsetWidth;
+      node.classList.add("flash");
+    },
+  };
+
   // ---------- Init ----------
   buildExamples();
   renderStatus();
   autosize();
+  window.Dashboard.init(bridge, dashboardView);
+  setView("chat");
 
   // Gate on the session: a valid stored token skips the login screen; otherwise show login.
   session = loadSession();

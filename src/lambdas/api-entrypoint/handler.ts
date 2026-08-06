@@ -25,6 +25,7 @@ import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
 import { runBacktest } from "../../shared/backtest/run.js";
 import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
+import type { RequestLogInput, RequestLogSection } from "../../shared/request-log.js";
 
 /** Max attached-file size, as base64 length (~5 MB of bytes → ~6.7 MB base64), under API Gateway's 10 MB cap. */
 const MAX_FILE_B64 = 6_800_000;
@@ -77,6 +78,22 @@ function parseBody(event: AskEvent): AskRequest {
   return { question: body.question.trim(), sessionId: body.sessionId, file, payload };
 }
 
+/** Minimal structural type for the Lambda SDK bits used here. */
+interface LambdaSdk {
+  LambdaClient: new (cfg: { region?: string }) => { send(cmd: unknown): Promise<{ Payload?: Uint8Array }> };
+  InvokeCommand: new (input: unknown) => unknown;
+}
+
+/**
+ * Load the Lambda SDK. A variable specifier keeps tsc from requiring @aws-sdk/client-lambda's types
+ * at build time — the SDK is provided by the Lambda runtime (external in the bundle), so it resolves
+ * at runtime.
+ */
+async function lambdaSdk(): Promise<LambdaSdk> {
+  const lambdaMod = "@aws-sdk/client-lambda";
+  return (await import(lambdaMod)) as unknown as LambdaSdk;
+}
+
 /**
  * Handle a file-bearing request: the attached file must NOT flow through the supervisor LLM, so we
  * invoke the VPC-enabled gateway Lambda directly (retrieve the file-upload operation + invoke it via
@@ -86,13 +103,7 @@ async function runGatewaySubmit(question: string, file: AskFile, payload: string
   const fn = process.env.GATEWAY_FN;
   if (!fn) throw new ValidationError("File uploads are not configured on this deployment.");
 
-  // Variable specifier so tsc doesn't require @aws-sdk/client-lambda's types at build time — the SDK
-  // is provided by the Lambda runtime (external in the bundle), so it resolves at runtime.
-  const lambdaMod = "@aws-sdk/client-lambda";
-  const { LambdaClient, InvokeCommand } = (await import(lambdaMod)) as unknown as {
-    LambdaClient: new (cfg: { region?: string }) => { send(cmd: unknown): Promise<{ Payload?: Uint8Array }> };
-    InvokeCommand: new (input: unknown) => unknown;
-  };
+  const { LambdaClient, InvokeCommand } = await lambdaSdk();
   const client = new LambdaClient({ region: process.env.BEDROCK_REGION ?? process.env.AWS_REGION });
   const event = { mode: "submit", question, file, payload, identifiers: auth?.identifiers ?? {} };
   const res = await client.send(new InvokeCommand({ FunctionName: fn, Payload: Buffer.from(JSON.stringify(event)) }));
@@ -193,6 +204,59 @@ function readAuthContext(event: AskEvent): AuthContext | undefined {
   return { userId: res.claims.sub, userName: res.claims.name || res.claims.username, identifiers: res.claims.ids ?? {} };
 }
 
+/**
+ * Fire one observation at the telemetry Lambda, which owns the durable request log.
+ *
+ * Async (InvocationType=Event) on purpose: this Lambda has no VPC attachment — it must reach the
+ * Bedrock public endpoints — so it cannot write to RDS itself, and the caller is still waiting on
+ * the response. An Event invoke costs the enqueue (~10ms) and nothing else.
+ *
+ * Every failure is swallowed. Telemetry that can fail a request is a bad trade, and the browser
+ * records the same observation locally regardless.
+ */
+async function emitTelemetry(record: RequestLogInput): Promise<void> {
+  const fn = process.env.TELEMETRY_FN;
+  if (!fn) return; // telemetry not deployed (e.g. database disabled) — the local store still works
+  try {
+    const { LambdaClient, InvokeCommand } = await lambdaSdk();
+    const client = new LambdaClient({ region: process.env.BEDROCK_REGION ?? process.env.AWS_REGION });
+    await client.send(new InvokeCommand({
+      FunctionName: fn,
+      InvocationType: "Event",
+      Payload: Buffer.from(JSON.stringify({ mode: "log", record })),
+    }));
+  } catch (err) {
+    log.warn("telemetry emit failed; the request is unaffected", { error: String(err) });
+  }
+}
+
+/** Per-section digest for the request log — row counts and the concrete operation behind each one. */
+function digestSections(report: FinalReport): RequestLogSection[] {
+  return (report.sections ?? []).map((sec) => {
+    const meta = (sec.meta ?? {}) as Record<string, unknown>;
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    return {
+      useCase: sec.useCase ?? sec.heading ?? "unknown",
+      rows: Array.isArray(sec.rows) ? sec.rows.length : 0,
+      endpoint: str(meta.endpoint),
+      httpMethod: str(meta.httpMethod),
+      backend: str(meta.backendId) ?? str(meta.backend),
+    };
+  });
+}
+
+/** RAG provenance, when the knowledge base answered. */
+function digestKb(report: FinalReport): RequestLogInput["kb"] {
+  if (report.type !== "KB") return undefined;
+  const sec = (report.sections ?? []).find((s) => s.meta && ("retrieval" in s.meta || "answer" in s.meta));
+  const meta = (sec?.meta ?? {}) as Record<string, unknown>;
+  return {
+    retrieval: typeof meta.retrieval === "string" ? meta.retrieval : undefined,
+    matched: typeof meta.matched === "number" ? meta.matched : sec ? sec.rows.length : 0,
+    citations: Array.isArray(meta.citations) ? meta.citations.length : 0,
+  };
+}
+
 /** Deterministic, in-process equivalent of the whole flow (identity → orchestrate → report). */
 async function runLocal(question: string, auth?: AuthContext): Promise<FinalReport> {
   const { type, results } = await orchestrate(question, auth);
@@ -234,6 +298,12 @@ async function produceReport(question: string, auth?: AuthContext): Promise<Fina
 export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2> => {
   const trace = traceId(event);
   const reqLog = log.child({ trace });
+  // Hoisted so the failure path can log the same observation the success path does — a request log
+  // that only records successes makes every error rate look like zero.
+  const startedAt = Date.now();
+  let question = "";
+  let auth: AuthContext | undefined;
+  let hadFile = false;
   try {
     // Validation sweep over the Fedline backend — no question, no orchestration; it replays every
     // registered operation through the dispatch path and checks the response tables.
@@ -256,13 +326,16 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
       return respond(200, { ok: true, summary, traceId: trace });
     }
 
-    const { question, file, payload } = parseBody(event);
+    const parsed = parseBody(event);
+    const { file, payload } = parsed;
+    question = parsed.question;
+    hadFile = Boolean(file);
 
     // Identity comes from the verified session token (via the authorizer context), not the question
     // text. If the authorizer is wired (production), an unauthenticated request never reaches here;
     // readAuthContext returning undefined means the route is running without an authorizer (e.g.
     // local dev), in which case orchestrate falls back to name-in-question resolution.
-    const auth = readAuthContext(event);
+    auth = readAuthContext(event);
     reqLog.info("ask received", { question, userId: auth?.userId, authenticated: Boolean(auth), hasFile: Boolean(file) });
 
     // A file-bearing request is a gateway file-upload (e.g. SCP): handle it deterministically via the
@@ -272,10 +345,47 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
       : await produceReport(question, auth);
 
     reqLog.info("ask completed", { type: report.type, sections: report.sections.length });
+
+    const sections = digestSections(report);
+    await emitTelemetry({
+      traceId: trace,
+      userRef: auth?.userId,
+      userName: auth?.userName,
+      question,
+      ok: true,
+      httpStatus: 200,
+      // Server-side processing time, NOT the caller's round trip — the browser records that
+      // separately. The dashboard labels each source so the two are never conflated.
+      latencyMs: Date.now() - startedAt,
+      type: report.type,
+      reportId: report.reportId,
+      orchestrated: report.routing?.requiresOrchestration,
+      rows: sections.reduce((a, s) => a + s.rows, 0),
+      hadFile,
+      trace: report.trace ?? [],
+      sections,
+      kb: digestKb(report),
+    });
+
     return respond(200, { ok: true, report, traceId: trace });
   } catch (err) {
     const e = toErrorBody(err);
     reqLog.error("ask failed", { code: e.code, message: e.message });
+    await emitTelemetry({
+      traceId: trace,
+      userRef: auth?.userId,
+      userName: auth?.userName,
+      question,
+      ok: false,
+      httpStatus: e.statusCode,
+      latencyMs: Date.now() - startedAt,
+      rows: 0,
+      hadFile,
+      error: `${e.code}: ${e.message}`,
+      errorKind: "http",
+      trace: [],
+      sections: [],
+    });
     return respond(e.statusCode, { ok: false, error: `${e.code}: ${e.message}`, traceId: trace });
   }
 };

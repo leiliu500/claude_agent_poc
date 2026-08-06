@@ -27,7 +27,9 @@ src/
     dispatch/        Bedrock Flow node: parse supervisor output → DispatchResult[]
     analytics/       Bedrock Flow node: analytics over dispatch results
     report/          Bedrock Flow node: final report generation
+    telemetry/       durable request log: async writes + POST /v1/metrics (in-VPC)
   agents/prompts/    agent instruction templates
+web/                 static UI: chat + operations dashboard (see web/README.md)
 terraform/
   modules/{iam,lambda,bedrock-agents,bedrock-flow,api-gateway}
   openapi/           action-group OpenAPI schemas (generated from the registry)
@@ -87,7 +89,32 @@ curl -s -X POST "$API_URL/v1/ask" \
   -H 'content-type: application/json' \
   -H "authorization: Bearer $TOKEN" \
   -d '{"question":"Give me the EDD summary report for Q2 and export it","sessionId":"demo-1"}' | jq
+
+# 3) Read the request log behind the operations dashboard (needs enable_database=true).
+curl -s -X POST "$API_URL/v1/metrics" \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $TOKEN" \
+  -d '{"rangeMs":86400000,"limit":500}' | jq '.source, (.records|length)'
 ```
+
+### Operations dashboard
+
+The UI has a second view alongside the chat — volume, latency, the execution path each request
+took, backend output, health and a live activity feed. See [`web/README.md`](web/README.md).
+
+It reads from either source, in the same record shape:
+
+- **`fedline.request_log`** (deployment-wide, all users) via `POST /v1/metrics`. One row per
+  `/v1/ask` attempt, written by the `telemetry` Lambda. The entrypoint has no VPC attachment — it
+  must reach the Bedrock public endpoints — so it fires an **async** (`Event`) invoke at that
+  Lambda rather than writing to RDS itself, and swallows every telemetry failure: a dashboard that
+  costs availability is a bad trade.
+- **the browser's own `localStorage`**, which works before the log is deployed, with
+  `enable_database = false`, or when the API is unreachable.
+
+The table and the `/v1/metrics` route only exist with `enable_database = true`. Adding the table
+to an existing deployment is the usual idempotent migration — re-invoke the `db-migrate` Lambda
+after `terraform apply` and it applies the new section of `db/schema.sql` in place.
 
 ## Example questions → routing
 
