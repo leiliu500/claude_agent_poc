@@ -20,10 +20,11 @@ import { runAnalytics } from "../analytics.js";
 import { llmRoute } from "../llm-router.js";
 import { route } from "../router.js";
 import { runPostDispatch } from "../postdispatch/pipeline.js";
-import { seedBuiltinBackends } from "../gateway/seed.js";
+import { builtinBackends, seedBuiltinBackends } from "../gateway/seed.js";
 import { getUseCase } from "../usecases.js";
 import { createLogger } from "../logger.js";
 import { FEDLINE_CASES, coverageGaps, type BacktestCase } from "./cases.js";
+import { exercisableCount, registryCases, type RegistryCase } from "./registry-cases.js";
 import { validateGrounding, validateRouting, validateTableData } from "./validators.js";
 import type { BacktestMode, BacktestSummary, BacktestTotals, CaseResult, CheckResult } from "./types.js";
 
@@ -33,6 +34,11 @@ export interface RunBacktestOptions {
   mode?: BacktestMode;
   /** Restrict the run to these caseIds (UI "re-run this case"); empty/absent ⇒ every case. */
   caseIds?: string[];
+  /**
+   * Which registered application to validate. Defaults to Fedline, the only one with an authored
+   * suite; any other registered id runs the registry-derived sweep (see registry-cases.ts).
+   */
+  backendId?: string;
 }
 
 /** Which operation would the system actually run for this question? undefined ⇒ nothing selected. */
@@ -130,13 +136,14 @@ async function runCase(kase: BacktestCase, mode: BacktestMode): Promise<CaseResu
 function tally(cases: CaseResult[]): BacktestTotals {
   const totals: BacktestTotals = {
     cases: cases.length,
-    passed: 0, failed: 0, errored: 0,
+    passed: 0, failed: 0, errored: 0, skipped: 0,
     checks: 0, checksPassed: 0, checksFailed: 0, checksSkipped: 0,
     falsePositives: 0, falseNegatives: 0, hallucinations: 0, dataIntegrity: 0,
   };
   for (const c of cases) {
     if (c.status === "pass") totals.passed++;
     else if (c.status === "fail") totals.failed++;
+    else if (c.status === "skip") totals.skipped++;
     else totals.errored++;
 
     for (const check of c.checks) {
@@ -183,15 +190,125 @@ function coverageCase(): CaseResult | undefined {
   };
 }
 
-/** Run the Fedline backtest and return the full, JSON-serialisable summary. */
+/** The default (and only authored) application. Any other id runs the registry-derived sweep. */
+export const AUTHORED_BACKEND_ID = "fedline";
+
+/**
+ * Replay one registry-derived case. Only safe, parameterless operations reach here — everything
+ * else was already marked skipped by `registryCases`, with its reason.
+ *
+ * The checks are deliberately few: a registration document justifies "the call succeeded and
+ * returned a table with consistent columns", and nothing more. Inventing column or rollup
+ * expectations for an application nobody authored a suite for would manufacture green ticks.
+ */
+async function runRegistryCase(rc: RegistryCase, backendId: string): Promise<CaseResult> {
+  const started = performance.now();
+  if (rc.skipReason) {
+    return {
+      caseId: rc.caseId, operationId: rc.operationId, label: rc.label, question: "—",
+      status: "skip", rowCount: 0, columns: [], latencyMs: 0, checks: [], skipReason: rc.skipReason,
+    };
+  }
+
+  try {
+    const result = await executeTask({ useCase: rc.operationId, params: {} } as TaskRequest);
+    const rows: Record<string, unknown>[] = Array.isArray(result?.data) ? result.data : [];
+    const firstRow = rows[0];
+    const columns = firstRow ? Object.keys(firstRow) : [];
+    const checks: CheckResult[] = [];
+
+    checks.push({
+      id: "dispatch.ok",
+      category: "dispatch",
+      status: result?.status === "ok" ? "pass" : "fail",
+      failureKind: result?.status === "ok" ? undefined : "false_negative",
+      detail: result?.status === "ok"
+        ? `${rc.method} ${rc.path} returned status 'ok'.`
+        : `${rc.method} ${rc.path} returned status '${String(result?.status)}'.`,
+      expected: ["ok"], actual: [String(result?.status)],
+    });
+
+    // Column consistency is the one table property a spec-less sweep can honestly assert: whatever
+    // the columns are, every row must carry the same ones.
+    const ragged = rows.filter((r: Record<string, unknown>) => {
+      const keys = Object.keys(r);
+      return keys.length !== columns.length || keys.some((k) => !columns.includes(k));
+    });
+    const firstRagged = ragged[0];
+    checks.push({
+      id: "rows.uniformColumns",
+      category: "schema",
+      status: rows.length ? (ragged.length ? "fail" : "pass") : "skip",
+      failureKind: ragged.length ? "data_integrity" : undefined,
+      detail: rows.length
+        ? (ragged.length
+            ? `${ragged.length} row(s) do not carry the same columns as the first row.`
+            : `All ${rows.length} row(s) carry the same ${columns.length} column(s).`)
+        : "No rows returned, so there is nothing to check for column consistency.",
+      expected: columns, actual: firstRagged ? Object.keys(firstRagged) : columns,
+    });
+
+    const failed = checks.some((c) => c.status === "fail");
+    return {
+      caseId: rc.caseId, operationId: rc.operationId, label: rc.label,
+      question: "—",
+      status: failed ? "fail" : "pass",
+      rowCount: rows.length, columns,
+      latencyMs: Math.round(performance.now() - started),
+      checks,
+    };
+  } catch (err) {
+    log.warn("registry case failed", { backendId, operationId: rc.operationId, error: String(err) });
+    return {
+      caseId: rc.caseId, operationId: rc.operationId, label: rc.label, question: "—",
+      status: "error", rowCount: 0, columns: [], latencyMs: Math.round(performance.now() - started),
+      checks: [], error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** Validate an application that has no authored suite, from its registered operations alone. */
+async function runRegistrySweep(backendId: string, mode: BacktestMode, startedAt: string, t0: number): Promise<BacktestSummary> {
+  const backend = builtinBackends().find((b) => b.backendId === backendId);
+  if (!backend) {
+    throw new Error(
+      `Unknown application '${backendId}'. Validation replays through the in-process dispatch path, ` +
+      `so it can only exercise applications this deployment has registered.`,
+    );
+  }
+  const derived = registryCases(backend);
+  log.info("registry sweep started", { backendId, operations: derived.length, exercisable: exercisableCount(derived) });
+  const cases = await Promise.all(derived.map((rc) => runRegistryCase(rc, backendId)));
+  return {
+    backendId,
+    backendName: backend.name ?? backendId,
+    suite: "registry",
+    mode,
+    startedAt,
+    durationMs: Math.round(performance.now() - t0),
+    totals: tally(cases),
+    cases,
+  };
+}
+
+/** Run the response-validation sweep for one application and return a JSON-serialisable summary. */
 export async function runBacktest(options: RunBacktestOptions = {}): Promise<BacktestSummary> {
   const mode: BacktestMode = options.mode === "full" ? "full" : "data";
+  const backendId = options.backendId?.trim() || AUTHORED_BACKEND_ID;
+  const startedAt = new Date().toISOString();
+  const t0 = performance.now();
+
+  // The registry sweep needs the in-process registry populated in either mode — unlike the authored
+  // suite, its operation list IS the registry.
+  if (backendId !== AUTHORED_BACKEND_ID) {
+    await ensureRegistrySeeded();
+    return runRegistrySweep(backendId, mode, startedAt, t0);
+  }
+
   const wanted = options.caseIds?.length ? new Set(options.caseIds) : undefined;
   const selected = FEDLINE_CASES.filter((c) => !wanted || wanted.has(c.caseId));
 
-  const startedAt = new Date().toISOString();
-  const t0 = performance.now();
-  log.info("backtest started", { mode, cases: selected.length });
+  log.info("backtest started", { backendId, mode, cases: selected.length });
 
   // Only `full` needs the registry (for the grounding check's policy lookup); `data` stays hermetic.
   if (mode === "full") await ensureRegistrySeeded();
@@ -205,7 +322,9 @@ export async function runBacktest(options: RunBacktestOptions = {}): Promise<Bac
   if (coverage) cases.push(coverage);
 
   const summary: BacktestSummary = {
-    backendId: "fedline",
+    backendId: AUTHORED_BACKEND_ID,
+    backendName: "Fedline",
+    suite: "authored",
     mode,
     startedAt,
     durationMs: Math.round(performance.now() - t0),
@@ -213,6 +332,7 @@ export async function runBacktest(options: RunBacktestOptions = {}): Promise<Bac
     cases,
   };
   log.info("backtest completed", {
+    backendId,
     mode,
     cases: summary.totals.cases,
     failed: summary.totals.failed,

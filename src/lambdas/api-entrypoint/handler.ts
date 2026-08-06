@@ -2,7 +2,8 @@
  * API Gateway (HTTP API) entrypoint.
  *
  *   POST /v1/ask       { question, sessionId? }   ->  { ok, report, traceId }
- *   POST /v1/backtest  { mode?, caseIds? }        ->  { ok, summary, traceId }
+ *   POST /v1/backtest  { backendId?, mode?, caseIds? } -> { ok, summary, traceId }
+ *   POST /v1/backtest  { action: "applications" }    -> { ok, applications, traceId }
  *
  * Best-practice topology: the supervisor agent is a node INSIDE the Bedrock Flow, so this
  * entrypoint's job is just transport + a single InvokeFlow call.
@@ -23,7 +24,9 @@ import { generateReport } from "../../shared/report.js";
 import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
-import { runBacktest } from "../../shared/backtest/run.js";
+import { runBacktest, AUTHORED_BACKEND_ID } from "../../shared/backtest/run.js";
+import { builtinBackends } from "../../shared/gateway/seed.js";
+import { registryCases, exercisableCount } from "../../shared/backtest/registry-cases.js";
 import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
 import type { RequestLogInput, RequestLogSection } from "../../shared/request-log.js";
 
@@ -130,10 +133,22 @@ function respond(statusCode: number, body: AskResponse | BacktestResponse): APIG
   };
 }
 
-/** Response of POST /v1/backtest. */
+/** One selectable application in the validation picker. */
+interface ValidatableApplication {
+  backendId: string;
+  name: string;
+  /** "authored" carries real table expectations; "registry" only what the spec can justify. */
+  suite: "authored" | "registry";
+  operations: number;
+  /** How many of those operations a sweep may actually replay (safe method, no unfillable params). */
+  exercisable: number;
+}
+
+/** Response of POST /v1/backtest — either a sweep summary or the picker's option list. */
 interface BacktestResponse {
   ok: boolean;
   summary?: BacktestSummary;
+  applications?: ValidatableApplication[];
   error?: string;
   traceId: string;
 }
@@ -151,10 +166,17 @@ function routeOf(event: AskEvent): "ask" | "backtest" {
 }
 
 /**
- * Parse the backtest request. Both fields are optional: the default is a full `data`-mode sweep of
- * every Fedline case, which is what the UI button sends.
+ * Parse the validation request. Every field is optional: the default is a `data`-mode sweep of the
+ * authored Fedline suite, which is what the UI's first run sends.
+ *
+ * `action: "applications"` asks for the picker's option list instead of running anything.
  */
-function parseBacktestBody(event: AskEvent): { mode: BacktestMode; caseIds?: string[] } {
+function parseBacktestBody(event: AskEvent): {
+  action: "run" | "applications";
+  mode: BacktestMode;
+  caseIds?: string[];
+  backendId?: string;
+} {
   let raw = event.body ?? "{}";
   if (event.isBase64Encoded) raw = Buffer.from(raw, "base64").toString("utf8");
   let parsed: unknown;
@@ -163,14 +185,25 @@ function parseBacktestBody(event: AskEvent): { mode: BacktestMode; caseIds?: str
   } catch {
     throw new ValidationError("Request body must be valid JSON.");
   }
-  const body = (parsed ?? {}) as { mode?: unknown; caseIds?: unknown };
+  const body = (parsed ?? {}) as { mode?: unknown; caseIds?: unknown; backendId?: unknown; action?: unknown };
+  if (body.action !== undefined && body.action !== "run" && body.action !== "applications") {
+    throw new ValidationError("Field 'action' must be 'run' or 'applications'.");
+  }
   if (body.mode !== undefined && body.mode !== "data" && body.mode !== "full") {
     throw new ValidationError("Field 'mode' must be 'data' or 'full'.");
+  }
+  if (body.backendId !== undefined && typeof body.backendId !== "string") {
+    throw new ValidationError("Field 'backendId' must be a string.");
   }
   const caseIds = Array.isArray(body.caseIds)
     ? body.caseIds.filter((c): c is string => typeof c === "string")
     : undefined;
-  return { mode: (body.mode as BacktestMode) ?? "data", caseIds };
+  return {
+    action: (body.action as "run" | "applications") ?? "run",
+    mode: (body.mode as BacktestMode) ?? "data",
+    caseIds,
+    backendId: typeof body.backendId === "string" ? body.backendId : undefined,
+  };
 }
 
 /**
@@ -295,6 +328,31 @@ async function produceReport(question: string, auth?: AuthContext): Promise<Fina
   }
 }
 
+/**
+ * The applications the validator can actually exercise, with an honest account of what a sweep of
+ * each would cover. `exercisable` is what makes the difference visible in the picker: an application
+ * whose only operations are non-GET or parameterised can still be selected, but its sweep will
+ * report every case as skipped — and saying so up front beats an empty-looking result.
+ *
+ * Listed from the in-process registry rather than the database because that is precisely what the
+ * runner replays through; offering an application the runner cannot reach would be a dead option.
+ */
+function listValidatableApplications(): ValidatableApplication[] {
+  return builtinBackends().map((b) => {
+    const authored = b.backendId === AUTHORED_BACKEND_ID;
+    const ops = b.operations ?? [];
+    return {
+      backendId: b.backendId,
+      name: b.name ?? b.backendId,
+      suite: authored ? "authored" : "registry",
+      operations: ops.length,
+      // The authored suite exercises every registered operation; a derived one only the safe,
+      // parameterless subset.
+      exercisable: authored ? ops.length : exercisableCount(registryCases(b)),
+    };
+  });
+}
+
 export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2> => {
   const trace = traceId(event);
   const reqLog = log.child({ trace });
@@ -317,11 +375,18 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
         reqLog.warn("backtest rejected: no valid session token");
         return respond(401, { ok: false, error: "UNAUTHORIZED: a valid session token is required.", traceId: trace });
       }
-      const { mode, caseIds } = parseBacktestBody(event);
-      reqLog.info("backtest received", { mode, caseIds: caseIds?.length ?? 0 });
-      const summary = await runBacktest({ mode, caseIds });
+      const { action, mode, caseIds, backendId } = parseBacktestBody(event);
+
+      // The picker's options. Listed from the in-process registry because that is exactly what the
+      // sweep can replay — offering an application the runner cannot exercise would be a dead option.
+      if (action === "applications") {
+        return respond(200, { ok: true, applications: listValidatableApplications(), traceId: trace });
+      }
+
+      reqLog.info("backtest received", { backendId: backendId ?? "fedline", mode, caseIds: caseIds?.length ?? 0 });
+      const summary = await runBacktest({ mode, caseIds, backendId });
       reqLog.info("backtest completed", {
-        mode, failed: summary.totals.failed, checksFailed: summary.totals.checksFailed,
+        backendId: summary.backendId, mode, failed: summary.totals.failed, checksFailed: summary.totals.checksFailed,
       });
       return respond(200, { ok: true, summary, traceId: trace });
     }
