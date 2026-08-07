@@ -36,6 +36,15 @@ locals {
   telemetry_entrypoint_env = var.enable_database ? {
     TELEMETRY_FN = module.lambda_workers.function_names["telemetry"]
   } : {}
+
+  # Safety guardrail, evaluated at the request boundary. An EMPTY id is meaningful: the runtime reads
+  # it as "no guardrail on this deployment" and runs unscreened, rather than failing every request —
+  # which is what a fail-closed control would otherwise do to a deployment that opted out.
+  guardrail_entrypoint_env = var.enable_guardrail ? {
+    GUARDRAIL_ID        = aws_bedrock_guardrail.main[0].guardrail_id
+    GUARDRAIL_VERSION   = aws_bedrock_guardrail_version.main[0].version
+    GUARDRAIL_FAIL_OPEN = var.guardrail_fail_open ? "true" : "false"
+  } : {}
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -263,7 +272,7 @@ module "lambda_entrypoint" {
       role_arn = module.iam.lambda_entrypoint_role_arn
       # In the best-practice topology the supervisor agent is a node INSIDE the flow,
       # so the entrypoint only needs to invoke the flow.
-      environment = merge(local.telemetry_entrypoint_env, {
+      environment = merge(local.telemetry_entrypoint_env, local.guardrail_entrypoint_env, {
         LOG_LEVEL          = var.log_level
         ORCHESTRATION_MODE = var.orchestration_mode
         BEDROCK_REGION     = local.region

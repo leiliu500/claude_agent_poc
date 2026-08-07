@@ -84,6 +84,15 @@ data "aws_iam_policy_document" "entrypoint_bedrock" {
     actions   = ["lambda:InvokeFunction"]
     resources = ["arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${var.name_prefix}-*"]
   }
+  # The safety guardrail is evaluated at the request boundary (ApplyGuardrail), so the entrypoint
+  # needs it on every /v1/ask. Scoped to guardrails in this account/region rather than "*": the
+  # entrypoint has no business applying someone else's policy.
+  statement {
+    sid       = "ApplyGuardrail"
+    effect    = "Allow"
+    actions   = ["bedrock:ApplyGuardrail"]
+    resources = ["arn:${local.partition}:bedrock:${local.region}:${local.account_id}:guardrail/*"]
+  }
 }
 
 resource "aws_iam_role_policy" "entrypoint_bedrock" {
