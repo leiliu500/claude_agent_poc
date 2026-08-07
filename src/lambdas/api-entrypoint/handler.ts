@@ -16,7 +16,7 @@
  * Agent mode degrades gracefully: if the flow invocation fails, it falls back to local.
  */
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
-import type { AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
+import type { AgentStep, AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { extractBearer, verifyToken } from "../../shared/auth.js";
 import { orchestrate } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
@@ -25,6 +25,7 @@ import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
 import { runBacktest, AUTHORED_BACKEND_ID } from "../../shared/backtest/run.js";
+import { screen, type GuardrailVerdict } from "../../shared/guardrail.js";
 import { builtinBackends } from "../../shared/gateway/seed.js";
 import { registryCases, exercisableCount } from "../../shared/backtest/registry-cases.js";
 import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
@@ -238,6 +239,31 @@ function readAuthContext(event: AskEvent): AuthContext | undefined {
 }
 
 /**
+ * Represent a guardrail evaluation as a step in the execution path.
+ *
+ * The dashboard's engine mix and the report's trace are the record of what actually ran, so a
+ * screening that happened — or one that could NOT happen — belongs there alongside the model and
+ * proxy steps. "deterministic" is accurate: ApplyGuardrail is a policy evaluation, not a model call
+ * we made, so counting it as a model invocation would inflate that KPI.
+ */
+function guardrailStep(v: GuardrailVerdict, source: "INPUT" | "OUTPUT"): AgentStep {
+  const detail =
+    v.outcome === "not-configured" ? "No guardrail configured on this deployment." :
+    v.outcome === "unavailable" ? "Guardrail could not be evaluated." :
+    v.reasons.length ? v.reasons.join(", ") : "No policy matched.";
+  return {
+    stage: "route",
+    agent: source === "INPUT" ? "Guardrail (input)" : "Guardrail (output)",
+    engine: "deterministic",
+    // A screening that did not run is "skipped", never "ran" — the trace must not imply the request
+    // was checked when it was not.
+    status: v.outcome === "not-configured" || v.outcome === "unavailable" ? "skipped" : "ran",
+    detail,
+    latencyMs: v.latencyMs,
+  };
+}
+
+/**
  * Fire one observation at the telemetry Lambda, which owns the durable request log.
  *
  * Async (InvocationType=Event) on purpose: this Lambda has no VPC attachment — it must reach the
@@ -403,6 +429,40 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
     auth = readAuthContext(event);
     reqLog.info("ask received", { question, userId: auth?.userId, authenticated: Boolean(auth), hasFile: Boolean(file) });
 
+    // ── Guardrail: screen the question BEFORE it reaches any model or router. ──
+    // This is the trust boundary. The question is untrusted text whose content steers which backend
+    // operation runs, so it is screened here rather than at each internal model hop — and screening
+    // here also covers the deterministic local fallback, which an inline guardrail would miss.
+    const inputScreen = await screen(question, "INPUT");
+    if (inputScreen.blocked) {
+      reqLog.warn("request blocked by guardrail", { outcome: inputScreen.outcome, reasons: inputScreen.reasons });
+      // 400 (not 403): the caller is authenticated and permitted — the CONTENT was rejected. The
+      // guardrail's own message is returned so the user knows what to change.
+      const status = inputScreen.outcome === "unavailable" ? 503 : 400;
+      const body = inputScreen.message ?? "This request was blocked by the system's safety guardrail.";
+      // Recorded like any other outcome, with its own errorKind so a blocked request is countable
+      // on the dashboard rather than hidden inside a generic failure bucket.
+      await emitTelemetry({
+        traceId: trace,
+        userRef: auth?.userId,
+        userName: auth?.userName,
+        question,
+        ok: false,
+        httpStatus: status,
+        latencyMs: Date.now() - startedAt,
+        rows: 0,
+        hadFile,
+        error: `${inputScreen.outcome}: ${inputScreen.reasons.join(", ") || "policy"}`,
+        errorKind: "guardrail",
+        trace: [guardrailStep(inputScreen, "INPUT")],
+        sections: [],
+      });
+      return respond(status, { ok: false, error: body, traceId: trace });
+    }
+    // Use the guardrail's text from here on: when it anonymised something (a pasted card number),
+    // the masked variant is what should reach the model and the log, not the original.
+    question = inputScreen.text;
+
     // A file-bearing request is a gateway file-upload (e.g. SCP): handle it deterministically via the
     // gateway Lambda so the file bytes never enter the LLM. Otherwise run the normal supervisor flow.
     const report = file
@@ -410,6 +470,41 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
       : await produceReport(question, auth);
 
     reqLog.info("ask completed", { type: report.type, sections: report.sections.length });
+
+    // ── Guardrail: screen what is about to leave the system. ──
+    // The narrative summary is the generated prose — the part a model wrote, and the only part that
+    // could carry content the input screen never saw (from a KB passage or a backend response).
+    // The data rows are NOT screened: they are the backend's own records, and masking figures in a
+    // financial report would corrupt the answer rather than protect anyone.
+    const outputScreen = await screen(report.summary ?? "", "OUTPUT");
+    if (outputScreen.blocked) {
+      reqLog.warn("response withheld by guardrail", { outcome: outputScreen.outcome, reasons: outputScreen.reasons });
+      const status = outputScreen.outcome === "unavailable" ? 503 : 502;
+      const body = outputScreen.message ?? "The generated response was withheld by the system's safety guardrail.";
+      await emitTelemetry({
+        traceId: trace,
+        userRef: auth?.userId,
+        userName: auth?.userName,
+        question,
+        ok: false,
+        httpStatus: status,
+        latencyMs: Date.now() - startedAt,
+        rows: 0,
+        hadFile,
+        error: `${outputScreen.outcome}: ${outputScreen.reasons.join(", ") || "policy"}`,
+        errorKind: "guardrail",
+        trace: [...(report.trace ?? []), guardrailStep(outputScreen, "OUTPUT")],
+        sections: [],
+      });
+      return respond(status, { ok: false, error: body, traceId: trace });
+    }
+    // A masked summary is the one the user should see, so replace it rather than shipping the
+    // original alongside a "we masked it" note.
+    if (outputScreen.outcome === "masked") report.summary = outputScreen.text;
+
+    // Both screenings belong on the trace: the dashboard's execution-path view is the record of what
+    // actually ran, and a screening that was skipped must be visible as skipped.
+    report.trace = [...(report.trace ?? []), guardrailStep(inputScreen, "INPUT"), guardrailStep(outputScreen, "OUTPUT")];
 
     const sections = digestSections(report);
     await emitTelemetry({

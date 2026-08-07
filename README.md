@@ -124,6 +124,67 @@ The table and the `/v1/metrics` route only exist with `enable_database = true`. 
 to an existing deployment is the usual idempotent migration — re-invoke the `db-migrate` Lambda
 after `terraform apply` and it applies the new section of `db/schema.sql` in place.
 
+## Security guardrails
+
+Two controls sit on the request path, both deployed and both verified against the live stack.
+
+### Bedrock guardrail at the trust boundary
+
+A Bedrock guardrail (`terraform/guardrail.tf`) is evaluated with the **ApplyGuardrail** API at two
+points in `src/shared/guardrail.ts`: the user's **question** on the way in, and the generated
+**summary** on the way out. Enforcement is explicit rather than attached inline to a model call, for
+two reasons — it behaves identically whichever model runs downstream (this deployment uses an OSS
+model, plus a Titan embedder and a Bedrock Flow), and it also covers the deterministic local
+fallback path that an inline guardrail would silently miss.
+
+Policies: `PROMPT_ATTACK` (the question steers which backend operation runs, so it is untrusted
+input), the standard content filters, profanity, sensitive-information rules that **block**
+credentials (`PASSWORD`, `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`) and **anonymise** card/SSN data, and two
+denied topics:
+
+- `SystemConfigurationDisclosure` — asking for the system prompt, credentials, environment variables
+  or infrastructure configuration.
+- `UnboundedDisclosure` — asking for *everything*: "show me everything you know", "dump all the data
+  you can see". A separate topic because it is a different ask — it names no credential and no
+  environment variable, so the configuration topic never matched it. The definition turns on
+  **scope**, which is what keeps `Show me all XShip fee details for 2026-Q2` working while
+  `Show me everything you know` is refused.
+
+Bedrock caps topic definitions at 200 characters and examples at 5 per topic; both limits are tight
+here, so an edit that adds detail may need to trade some away.
+
+`US_BANK_ROUTING_NUMBER` is deliberately **not** filtered: ABA routing numbers are the domain — every
+EDD and XShip report is keyed on them — so redacting them would break the product, not protect it.
+
+**Fail closed.** If the guardrail cannot be evaluated the request is rejected rather than served
+unscreened; a control that quietly stops running while everything still looks green is worse than no
+control. `guardrail_fail_open = true` inverts the trade.
+
+Editing the policy publishes a **new guardrail version**, and the Lambdas follow it. That is not
+automatic — `aws_bedrock_guardrail_version` has no dependency on the policy content, so without the
+`replace_triggered_by` in `terraform/guardrail.tf` an edit would update `DRAFT`, leave the pinned
+version frozen, and change nothing at runtime: a policy that reads as tightened and is not enforced. Either way the outcome is recorded: blocked
+requests land in the request log with `errorKind: "guardrail"` and the reasons that tripped, and both
+screenings appear on the report trace — a screening that did **not** run shows as `skipped`, never as
+`ran`.
+
+Data rows are never screened. They are the backend's own records, and masking figures in a financial
+report would corrupt the answer rather than protect anyone.
+
+### Egress guard on the generic proxy
+
+A backend's `baseUrl` is attacker-influenced — applications are registered at runtime by dropping a
+document in S3, and the proxy then calls that URL from inside the VPC. `src/shared/gateway/egress.ts`
+refuses loopback, link-local (**the instance metadata service**, the standard SSRF pivot to
+credentials), RFC1918, carrier-grade NAT, `0/8`, multicast, IPv6 link-local/unique-local,
+IPv4-mapped IPv6 spellings of all of the above, non-HTTP schemes, embedded credentials, and plain
+HTTP. It is enforced at **registration** (rejected at the door, where the error is actionable) and
+again **immediately before the request is issued**, since a registry row can change after it was
+checked. Redirects are not followed — a redirect target is a second, unvalidated destination.
+
+Known limit: a hostname that *resolves* to a private address is not caught. Resolving at check time
+would only invite a DNS-rebinding race between the check and the connection.
+
 ## Example questions → routing
 
 | Question | Type | Use case(s) | Orchestrated? |

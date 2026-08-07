@@ -17,6 +17,7 @@
  * and VPC endpoints work as-is; external SaaS needs egress. Mock mode sidesteps this for demos/tests.
  */
 import type { DispatchResult } from "../types.js";
+import { assertEgressAllowed } from "./egress.js";
 import { createLogger } from "../logger.js";
 import { getBackend } from "./registry.js";
 import { MOCK_GENERATORS, generateMock } from "../../mock/data.js";
@@ -264,7 +265,19 @@ export async function invokeBackend(input: InvokeInput): Promise<DispatchResult>
       url: req.url,
       multipart: Boolean(req.form),
     });
-    const res = await fetch(req.url, { method: req.method, headers: req.headers, body, signal: controller.signal });
+    // Re-checked here, not only at registration: the registry row can change after a backend was
+    // registered, and this is the last point before bytes leave the VPC. A check that ran earlier is
+    // not a check on THIS request.
+    assertEgressAllowed(req.url, `Refusing to call ${input.backendId}/${input.operationId}`);
+    const res = await fetch(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body,
+      signal: controller.signal,
+      // A redirect is a second, unvalidated destination — following one would step around the
+      // egress guard entirely. Surface it as a response instead of chasing it.
+      redirect: "manual",
+    });
 
     const text = await res.text();
     const contentType = res.headers.get("content-type") ?? "";

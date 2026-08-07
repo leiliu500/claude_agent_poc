@@ -105,3 +105,25 @@ variable "gateway_mock" {
   type        = bool
   default     = true
 }
+
+# ── Security guardrail ────────────────────────────────────────────────────────
+variable "enable_guardrail" {
+  description = <<-EOT
+    Create the Bedrock guardrail and enforce it at the request boundary. When false the guardrail
+    resources are not created and GUARDRAIL_ID is empty, which the runtime treats as "no guardrail
+    configured" — it then runs unscreened rather than failing every request.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "guardrail_fail_open" {
+  description = <<-EOT
+    What to do when the guardrail check itself cannot run (throttle, outage, missing permission).
+    Default false = FAIL CLOSED: the request is rejected rather than served unscreened, because a
+    security control that silently no-ops creates false assurance. Set true to prefer availability;
+    either way the outcome is recorded on the trace and in the request log, never silently dropped.
+  EOT
+  type        = bool
+  default     = false
+}

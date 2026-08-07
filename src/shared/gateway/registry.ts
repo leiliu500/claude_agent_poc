@@ -15,6 +15,7 @@
  * one. `embedText` is reused verbatim from kb.ts so query and operation embeddings share a model+dim.
  */
 import { createLogger } from "../logger.js";
+import { assertEgressAllowed } from "./egress.js";
 import { hasDatabase, query } from "../pg.js";
 import { embedText, toVectorLiteral } from "../kb.js";
 import { parseOpenApi } from "./openapi.js";
@@ -64,6 +65,9 @@ function toBackend(input: RegisterBackendInput): RegisteredBackend {
     throw new Error(`Backend '${input.backendId}' has no operations (supply an OpenAPI spec or operations).`);
   }
   if (!input.baseUrl) throw new Error(`Backend '${input.backendId}' requires a baseUrl.`);
+  // Checked at the door: a registration document is attacker-influenced input, and the proxy calls
+  // this URL from inside the VPC. See gateway/egress.ts for what is refused and why.
+  assertEgressAllowed(input.baseUrl, `Backend '${input.backendId}' baseUrl rejected`);
   return {
     backendId: input.backendId,
     name: input.name ?? input.backendId,
