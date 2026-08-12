@@ -5,8 +5,8 @@
  * strict {type,tasks,dispatchResults} contract supervisor-parse.ts expects, so every request silently
  * fell back to the deterministic keyword router (regex). This module makes the LLM drive routing in a
  * way that CANNOT silently no-op: it calls the same Bedrock Converse model the post-dispatch agents use
- * (POSTDISPATCH_MODEL) with a CONSTRAINED task — pick one operation id from a fixed MENU and extract its
- * params — then VALIDATES the pick against the real use-case catalog. Anything the model gets wrong
+ * (POSTDISPATCH_MODEL) with a CONSTRAINED task — pick one business use-case id from a fixed MENU and
+ * extract its params — then VALIDATES the pick against the real use-case catalog. Anything the model gets wrong
  * (unknown id, no JSON, timeout, model unavailable) returns undefined and the caller uses the
  * deterministic router. So: LLM decides when it can, deterministic router is the safety net, and every
  * fallback is logged (never silent).
@@ -46,7 +46,7 @@ export function llmRouterEnabled(): boolean {
   return postDispatchModelConfigured();
 }
 
-/** The closed menu of operations the model may choose from (every static use case). */
+/** The closed menu of business use cases the classifier may choose from. It contains no API location data. */
 function buildMenu(): string {
   return USE_CASES.map((uc) => {
     const params = uc.params.map((p) => p.name).join(", ") || "none";
@@ -87,7 +87,7 @@ export async function llmRoute(question: string): Promise<RoutingDecision | unde
 
   let raw: string;
   try {
-    raw = await converseText(SYSTEM, `MENU:\n${buildMenu()}\n\nQUESTION: ${question}`, {
+    raw = await converseText(SYSTEM, `BUSINESS USE-CASE MENU:\n${buildMenu()}\n\nQUESTION: ${question}`, {
       maxTokens: MAX_TOKENS,
       timeoutMs: TIMEOUT_MS,
     });

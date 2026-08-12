@@ -176,7 +176,7 @@ export interface AgentStep {
   model?: string;
   /** 0..1 confidence (routing) or relevance score (gateway retrieval) or agent self-report. */
   confidence?: number;
-  /** Short human detail, e.g. "→ ctDepositsSummary" or "3 insights". */
+  /** Short human detail, e.g. "Business use case: CT Deposits Summary" or "3 insights". */
   detail?: string;
   /** Wall-clock ms for this step. */
   latencyMs?: number;
