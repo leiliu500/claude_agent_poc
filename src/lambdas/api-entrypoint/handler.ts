@@ -16,7 +16,7 @@
  * Agent mode degrades gracefully: if the flow invocation fails, it falls back to local.
  */
 import type { APIGatewayProxyEventV2WithLambdaAuthorizer, APIGatewayProxyResultV2 } from "aws-lambda";
-import type { AgentStep, AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
+import type { AskFile, AskRequest, AskResponse, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
 import { extractBearer, verifyToken } from "../../shared/auth.js";
 import { orchestrate } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
@@ -25,7 +25,7 @@ import { invokeFlow } from "../../shared/bedrock.js";
 import { createLogger } from "../../shared/logger.js";
 import { toErrorBody, ValidationError } from "../../shared/errors.js";
 import { runBacktest, AUTHORED_BACKEND_ID } from "../../shared/backtest/run.js";
-import { screen, type GuardrailVerdict } from "../../shared/guardrail.js";
+import { guardrailTrace, screen } from "../../shared/guardrail.js";
 import { builtinBackends } from "../../shared/gateway/seed.js";
 import { registryCases, exercisableCount } from "../../shared/backtest/registry-cases.js";
 import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
@@ -239,31 +239,6 @@ function readAuthContext(event: AskEvent): AuthContext | undefined {
 }
 
 /**
- * Represent a guardrail evaluation as a step in the execution path.
- *
- * The dashboard's engine mix and the report's trace are the record of what actually ran, so a
- * screening that happened — or one that could NOT happen — belongs there alongside the model and
- * proxy steps. "deterministic" is accurate: ApplyGuardrail is a policy evaluation, not a model call
- * we made, so counting it as a model invocation would inflate that KPI.
- */
-function guardrailStep(v: GuardrailVerdict, source: "INPUT" | "OUTPUT"): AgentStep {
-  const detail =
-    v.outcome === "not-configured" ? "No guardrail configured on this deployment." :
-    v.outcome === "unavailable" ? "Guardrail could not be evaluated." :
-    v.reasons.length ? v.reasons.join(", ") : "No policy matched.";
-  return {
-    stage: "route",
-    agent: source === "INPUT" ? "Guardrail (input)" : "Guardrail (output)",
-    engine: "deterministic",
-    // A screening that did not run is "skipped", never "ran" — the trace must not imply the request
-    // was checked when it was not.
-    status: v.outcome === "not-configured" || v.outcome === "unavailable" ? "skipped" : "ran",
-    detail,
-    latencyMs: v.latencyMs,
-  };
-}
-
-/**
  * Fire one observation at the telemetry Lambda, which owns the durable request log.
  *
  * Async (InvocationType=Event) on purpose: this Lambda has no VPC attachment — it must reach the
@@ -454,7 +429,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
         hadFile,
         error: `${inputScreen.outcome}: ${inputScreen.reasons.join(", ") || "policy"}`,
         errorKind: "guardrail",
-        trace: [guardrailStep(inputScreen, "INPUT")],
+        trace: guardrailTrace(inputScreen, []),
         sections: [],
       });
       return respond(status, { ok: false, error: body, traceId: trace });
@@ -493,7 +468,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
         hadFile,
         error: `${outputScreen.outcome}: ${outputScreen.reasons.join(", ") || "policy"}`,
         errorKind: "guardrail",
-        trace: [...(report.trace ?? []), guardrailStep(outputScreen, "OUTPUT")],
+        trace: guardrailTrace(inputScreen, report.trace ?? [], outputScreen),
         sections: [],
       });
       return respond(status, { ok: false, error: body, traceId: trace });
@@ -504,7 +479,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
 
     // Both screenings belong on the trace: the dashboard's execution-path view is the record of what
     // actually ran, and a screening that was skipped must be visible as skipped.
-    report.trace = [...(report.trace ?? []), guardrailStep(inputScreen, "INPUT"), guardrailStep(outputScreen, "OUTPUT")];
+    report.trace = guardrailTrace(inputScreen, report.trace ?? [], outputScreen);
 
     const sections = digestSections(report);
     await emitTelemetry({

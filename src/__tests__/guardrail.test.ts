@@ -8,6 +8,7 @@
  *   · not configured             → allow, reported as such, distinct from a check that failed.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { AgentStep } from "../shared/types.js";
 
 const sendMock = vi.fn();
 
@@ -20,7 +21,7 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => ({
   },
 }));
 
-const { screen, guardrailConfigured, resetGuardrailClient } = await import("../shared/guardrail.js");
+const { guardrailTrace, screen, guardrailConfigured, resetGuardrailClient } = await import("../shared/guardrail.js");
 
 beforeEach(() => {
   sendMock.mockReset();
@@ -60,6 +61,54 @@ describe("guardrail: configuration", () => {
     expect(input.guardrailIdentifier).toBe("gr-test");
     expect(input.guardrailVersion).toBe("1");
     expect(input.source).toBe("OUTPUT");
+  });
+});
+
+describe("guardrail: execution trace", () => {
+  it("places input before the pipeline and output after it", () => {
+    const allowed = {
+      outcome: "allowed" as const,
+      blocked: false,
+      reasons: [],
+      text: "allowed",
+      latencyMs: 10,
+    };
+    const pipelineStep: AgentStep = {
+      stage: "route",
+      agent: "Use-case classifier",
+      engine: "llm",
+      status: "ran",
+    };
+
+    const trace = guardrailTrace(allowed, [pipelineStep], { ...allowed, latencyMs: 20 });
+
+    expect(trace.map((step) => step.agent)).toEqual([
+      "Guardrail (input)",
+      "Use-case classifier",
+      "Guardrail (output)",
+    ]);
+  });
+
+  it("retains the successful input check when output screening blocks", () => {
+    const input = {
+      outcome: "allowed" as const,
+      blocked: false,
+      reasons: [],
+      text: "question",
+      latencyMs: 10,
+    };
+    const output = {
+      outcome: "blocked" as const,
+      blocked: true,
+      reasons: ["PROMPT_ATTACK"],
+      text: "summary",
+      latencyMs: 20,
+    };
+
+    expect(guardrailTrace(input, [], output).map((step) => step.agent)).toEqual([
+      "Guardrail (input)",
+      "Guardrail (output)",
+    ]);
   });
 });
 

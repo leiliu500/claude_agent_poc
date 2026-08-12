@@ -12,7 +12,7 @@ import { resolveEndpoint } from "../shared/usecases.js";
 import { makeActionGroupHandler } from "../shared/action-group.js";
 import { readFlowInputs } from "../shared/flow-io.js";
 import { handler as dispatchHandler } from "../lambdas/dispatch/handler.js";
-import { handler as processHandler } from "../lambdas/flow-process/handler.js";
+import { buildTrace, handler as processHandler } from "../lambdas/flow-process/handler.js";
 import { handler as dbHandler } from "../lambdas/action-groups/db/handler.js";
 import { orchestrate, extractReportId } from "../shared/orchestrator.js";
 import { clearMemoryForTests } from "../shared/report-memory.js";
@@ -234,6 +234,40 @@ describe("dispatch flow node", () => {
 });
 
 describe("flow-process node (combined dispatch+analytics+report)", () => {
+  it("keeps business use-case classification distinct from API discovery in the trace", () => {
+    const trace = buildTrace(
+      {
+        engine: "llm",
+        model: "openai.gpt-oss-120b-1:0",
+        confidence: 0.99,
+        latencyMs: 3359,
+        useCases: ["eddSummaryReport"],
+      },
+      {
+        ran: true,
+        engine: "llm",
+        model: "openai.gpt-oss-120b-1:0",
+        backendId: "fedline",
+        operationId: "eddSummaryReport",
+        score: 0.9,
+        latencyMs: 1721,
+      },
+      [],
+      undefined,
+    );
+
+    expect(trace[0]).toMatchObject({
+      stage: "route",
+      agent: "Use-case classifier",
+      detail: "Business use case: EDD Summary Report",
+    });
+    expect(trace[1]).toMatchObject({
+      stage: "gateway",
+      agent: "Gateway agent",
+      detail: "Application: fedline / API operation: eddSummaryReport",
+    });
+  });
+
   it("ignores the supervisor's echoed output and orchestrates from the question (single in-code path)", async () => {
     // If trusted, this echoed EDD result would surface a bogus riskScore. The in-code path IGNORES it.
     const agentResponse = JSON.stringify({

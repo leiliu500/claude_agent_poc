@@ -18,6 +18,7 @@
  * dev/local deployment usable without pretending it was screened.
  */
 import { createLogger } from "./logger.js";
+import type { AgentStep } from "./types.js";
 
 const log = createLogger({ mod: "guardrail" });
 
@@ -45,6 +46,39 @@ export interface GuardrailVerdict {
   /** The text to use downstream: the masked variant when the guardrail rewrote it. */
   text: string;
   latencyMs: number;
+}
+
+/** Represent one policy evaluation in the request execution trace. */
+export function guardrailStep(v: GuardrailVerdict, source: "INPUT" | "OUTPUT"): AgentStep {
+  const detail =
+    v.outcome === "not-configured" ? "No guardrail configured on this deployment." :
+    v.outcome === "unavailable" ? "Guardrail could not be evaluated." :
+    v.reasons.length ? v.reasons.join(", ") : "No policy matched.";
+  return {
+    stage: "route",
+    agent: source === "INPUT" ? "Guardrail (input)" : "Guardrail (output)",
+    engine: "deterministic",
+    // A screening that did not run is "skipped", never "ran".
+    status: v.outcome === "not-configured" || v.outcome === "unavailable" ? "skipped" : "ran",
+    detail,
+    latencyMs: v.latencyMs,
+  };
+}
+
+/**
+ * Preserve execution order in the trace: input screening is the trust boundary, while output
+ * screening runs only after the report pipeline has produced its narrative.
+ */
+export function guardrailTrace(
+  input: GuardrailVerdict,
+  pipeline: readonly AgentStep[],
+  output?: GuardrailVerdict,
+): AgentStep[] {
+  return [
+    guardrailStep(input, "INPUT"),
+    ...pipeline,
+    ...(output ? [guardrailStep(output, "OUTPUT")] : []),
+  ];
 }
 
 const guardrailId = () => process.env.GUARDRAIL_ID?.trim() ?? "";

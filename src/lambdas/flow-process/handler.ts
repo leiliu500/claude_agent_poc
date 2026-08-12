@@ -26,6 +26,7 @@ import { runAnalytics } from "../../shared/analytics.js";
 import { generateReport } from "../../shared/report.js";
 import { runPostDispatch, type PostDispatchOutput } from "../../shared/postdispatch/pipeline.js";
 import { createLogger } from "../../shared/logger.js";
+import { getUseCase } from "../../shared/usecases.js";
 
 const log = createLogger({ mod: "flow-process-node" });
 
@@ -86,7 +87,7 @@ async function resolveResults(
  * agents. Every step reflects what ACTUALLY ran (or was skipped) — the evidence the system is
  * agent-driven, and the two-layer (route → gateway) decoupling made visible.
  */
-function buildTrace(
+export function buildTrace(
   routeMeta: RouteMeta,
   gatewayMeta: GatewayMeta,
   results: DispatchResult[],
@@ -94,11 +95,13 @@ function buildTrace(
 ): AgentStep[] {
   const steps: AgentStep[] = [];
 
-  // 1) Routing agent (Layer 1): human language → target operation(s).
+  // 1) Use-case classifier (Layer 1): human language -> business deliverable(s). It deliberately
+  //    reports catalog labels rather than operation-shaped ids; backend/API resolution belongs to Layer 2.
+  const useCaseLabels = routeMeta.useCases.map((id) => getUseCase(id)?.label ?? id);
   steps.push({
-    stage: "route", agent: "Routing classifier", engine: routeMeta.engine, status: "ran",
+    stage: "route", agent: "Use-case classifier", engine: routeMeta.engine, status: "ran",
     model: routeMeta.model, confidence: routeMeta.confidence,
-    detail: `→ ${routeMeta.useCases.join(", ") || "—"}`, latencyMs: routeMeta.latencyMs,
+    detail: `Business use case: ${useCaseLabels.join(", ") || "Unclassified"}`, latencyMs: routeMeta.latencyMs,
   });
 
   // 2) Gateway discovery AGENT (Layer 2, gateway.md): discovers which registered operation serves the
@@ -107,7 +110,9 @@ function buildTrace(
     steps.push({
       stage: "gateway", agent: "Gateway agent", engine: gatewayMeta.engine ?? "proxy", status: "ran",
       model: gatewayMeta.model, confidence: gatewayMeta.score,
-      detail: [gatewayMeta.backendId, gatewayMeta.operationId].filter(Boolean).join(" / ") || "matched",
+      detail: gatewayMeta.backendId && gatewayMeta.operationId
+        ? `Application: ${gatewayMeta.backendId} / API operation: ${gatewayMeta.operationId}`
+        : "API operation matched",
       latencyMs: gatewayMeta.latencyMs,
     });
   } else {
