@@ -139,7 +139,7 @@ fallback path that an inline guardrail would silently miss.
 
 Policies: `PROMPT_ATTACK` (the question steers which backend operation runs, so it is untrusted
 input), the standard content filters, profanity, sensitive-information rules that **block**
-credentials (`PASSWORD`, `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`) and **anonymise** card/SSN data, and two
+credentials (`PASSWORD`, `AWS_ACCESS_KEY`, `AWS_SECRET_KEY`) and **anonymise** card/SSN data, and three
 denied topics:
 
 - `SystemConfigurationDisclosure` — asking for the system prompt, credentials, environment variables
@@ -149,6 +149,9 @@ denied topics:
   environment variable, so the configuration topic never matched it. The definition turns on
   **scope**, which is what keeps `Show me all XShip fee details for 2026-Q2` working while
   `Show me everything you know` is refused.
+- `AuthorizationBypass` - asking to impersonate an administrator or another user, elevate the
+  caller's role, ignore permissions, or retrieve a report using authority the signed-in caller does
+  not have. Identity and report identifiers come only from the verified session token.
 
 Bedrock caps topic definitions at 200 characters and examples at 5 per topic; both limits are tight
 here, so an edit that adds detail may need to trade some away.
