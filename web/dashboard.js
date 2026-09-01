@@ -232,6 +232,14 @@
    * owns the data, and the view only formats it.
    */
   const succRate = (t) => (t && t.requests ? (t.succeeded / t.requests) * 100 : null);
+  const usd = (value) => {
+    const n = Number(value) || 0;
+    if (n === 0) return "$0.00";
+    if (n < 0.01) return "$" + n.toFixed(4);
+    return "$" + n.toFixed(2);
+  };
+  const costLabel = (cost, unpricedTokens) =>
+    usd(cost) + (unpricedTokens ? ` + ${C.compact(unpricedTokens)} unpriced tokens` : "");
 
   function heroRow(M, tk, width) {
     const cur = M.totals;
@@ -296,6 +304,24 @@
         upIsGood: true,
         note: prev === null ? "across every report section" : undefined,
         spark: spark(col("rowsReturned"), tk.s1),
+      }),
+      statTile({
+        label: "Tokens consumed",
+        value: C.compact(cur.totalTokens || 0),
+        delta: delta(cur.totalTokens || 0, prev ? prev.totalTokens : null),
+        deltaText: Math.abs(delta(cur.totalTokens || 0, prev ? prev.totalTokens : null) || 0).toFixed(0) + "%",
+        upIsGood: false,
+        note: `${C.compact(cur.inputTokens || 0)} input · ${C.compact(cur.outputTokens || 0)} output`,
+        spark: spark(col("totalTokens"), tk.s1),
+      }),
+      statTile({
+        label: "Estimated model cost",
+        value: usd(cur.costUsd),
+        delta: delta(cur.costUsd || 0, prev ? prev.costUsd : null),
+        deltaText: Math.abs(delta(cur.costUsd || 0, prev ? prev.costUsd : null) || 0).toFixed(0) + "%",
+        upIsGood: false,
+        note: cur.unpricedTokens ? `${C.compact(cur.unpricedTokens)} tokens have no configured rate` : "USD · invocation-time rates",
+        spark: spark(col("costUsd"), tk.s1),
       }),
     ]);
 
@@ -364,6 +390,32 @@
     });
 
     // ── Routing: which collaborator the supervisor picked. One series → one color for every bar.
+    const tokenBuckets = M.series.map((b) => ({
+      label: bucketLabel(b.t, span),
+      segments: [
+        { name: "Input", color: tk.s1, value: b.inputTokens || 0 },
+        { name: "Output", color: tk.s2, value: b.outputTokens || 0 },
+      ],
+    }));
+    const tokens = card({
+      title: "Token consumption",
+      subtitle: `Provider-reported tokens · ${costLabel(M.totals.costUsd, M.totals.unpricedTokens)}`,
+      body: M.totals.totalTokens ? C.columns({ width: w, height: 190, buckets: tokenBuckets }) : null,
+      legend: C.legend([{ name: "Input", color: tk.s1 }, { name: "Output", color: tk.s2 }]),
+      empty: "No metered model tokens in this range.",
+      table: () => C.table(
+        [
+          { key: "t", label: "Bucket" }, { key: "input", label: "Input", num: true },
+          { key: "output", label: "Output", num: true }, { key: "total", label: "Total", num: true },
+          { key: "cost", label: "Est. cost", num: true },
+        ],
+        M.series.map((b) => ({
+          t: stamp(b.t), input: (b.inputTokens || 0).toLocaleString(), output: (b.outputTokens || 0).toLocaleString(),
+          total: (b.totalTokens || 0).toLocaleString(), cost: costLabel(b.costUsd, b.unpricedTokens),
+        })),
+      ),
+    });
+
     const routing = card({
       title: "Routing by agent type",
       subtitle: "Which collaborator the supervisor selected",
@@ -423,23 +475,32 @@
     // ── Model usage. Model ids are long identifiers — a table reads them better than any chart.
     const modelRows = M.models.map((m) => ({
       model: m.model,
-      calls: m.steps,
+      calls: m.calls === undefined ? m.steps : m.calls,
+      input: (m.inputTokens || 0).toLocaleString(),
+      output: (m.outputTokens || 0).toLocaleString(),
+      total: (m.totalTokens || 0).toLocaleString(),
+      cost: costLabel(m.costUsd, m.unpricedTokens),
       conf: m.avgConfidence === null ? "—" : C.pct(m.avgConfidence * 100),
       lat: m.medianMs === null ? "—" : C.ms(m.medianMs),
     }));
     const models = card({
       title: "Foundation model usage",
-      subtitle: "Steps whose engine reported a model id",
+      subtitle: "Calls, provider-reported tokens, and invocation-time estimated cost",
       body: modelRows.length
         ? C.table(
-            [{ key: "model", label: "Model" }, { key: "calls", label: "Steps", num: true }, { key: "conf", label: "Avg confidence", num: true }, { key: "lat", label: "Median step", num: true }],
+            [
+              { key: "model", label: "Model" }, { key: "calls", label: "Calls", num: true },
+              { key: "input", label: "Input", num: true }, { key: "output", label: "Output", num: true },
+              { key: "total", label: "Total", num: true }, { key: "cost", label: "Est. cost", num: true },
+              { key: "lat", label: "Median step", num: true },
+            ],
             modelRows,
           )
         : null,
       empty: "No model-backed steps in this range — the deterministic path handled every request.",
     });
 
-    return [volume, latency, routing, engines, stages, models];
+    return [volume, latency, tokens, routing, engines, stages, models];
   }
 
   function backendSection(M, tk, w) {
@@ -885,6 +946,7 @@
           showUser ? h("th", { text: "User" }) : null,
           h("th", { text: "Request" }), h("th", { text: "Type" }),
           h("th", { text: "Status" }), h("th", { class: "num", text: "Latency" }),
+          h("th", { class: "num", text: "Model usage" }), h("th", { class: "num", text: "Est. cost" }),
           h("th", { class: "num", text: "Steps" }), h("th", { class: "num", text: "Rows" }),
         ].filter(Boolean))),
         h("tbody", {}, rows.map((r) => {
@@ -902,6 +964,12 @@
             h("td", {}, r.type ? h("span", { class: "act-chip", text: r.type }) : h("span", { class: "act-dim", text: "—" })),
             h("td", {}, statusPill(r.ok ? "good" : "critical", r.ok ? "ok" : r.errorKind || "failed")),
             h("td", { class: "num", text: C.ms(r.latencyMs) }),
+            h("td", {
+              class: "num",
+              text: r.totalTokens ? `${C.compact(r.totalTokens)} tokens · ${r.modelCalls || 0} call(s)` : "—",
+              title: r.totalTokens ? `${(r.inputTokens || 0).toLocaleString()} input + ${(r.outputTokens || 0).toLocaleString()} output` : "No metered tokens",
+            }),
+            h("td", { class: "num", text: r.totalTokens ? costLabel(r.costUsd, r.unpricedTokens) : "—" }),
             h("td", { class: "num", text: `${r.steps}${r.llmSteps ? ` (${r.llmSteps} LLM)` : ""}` }),
             h("td", { class: "num", text: r.ok ? (r.rows || 0).toLocaleString() : "—" }),
           ].filter(Boolean));

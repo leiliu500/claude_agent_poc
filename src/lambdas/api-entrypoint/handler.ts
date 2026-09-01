@@ -30,6 +30,7 @@ import { builtinBackends } from "../../shared/gateway/seed.js";
 import { registryCases, exercisableCount } from "../../shared/backtest/registry-cases.js";
 import type { BacktestMode, BacktestSummary } from "../../shared/backtest/types.js";
 import type { RequestLogInput, RequestLogSection } from "../../shared/request-log.js";
+import { validModelUsage } from "../../shared/model-usage.js";
 
 /** Max attached-file size, as base64 length (~5 MB of bytes → ~6.7 MB base64), under API Gateway's 10 MB cap. */
 const MAX_FILE_B64 = 6_800_000;
@@ -117,13 +118,15 @@ async function runGatewaySubmit(question: string, file: AskFile, payload: string
 
   const result = parsed.result;
   const analytics = runAnalytics([result]);
-  return generateReport({
+  const report = generateReport({
     question,
     type: "Gateway",
     dispatchResults: [result],
     analytics,
     generatedAt: new Date().toISOString(),
   });
+  report.usage = validModelUsage(result.meta?.modelUsage);
+  return report;
 }
 
 function respond(statusCode: number, body: AskResponse | BacktestResponse): APIGatewayProxyResultV2 {
@@ -293,15 +296,21 @@ function digestKb(report: FinalReport): RequestLogInput["kb"] {
 
 /** Deterministic, in-process equivalent of the whole flow (identity → orchestrate → report). */
 async function runLocal(question: string, auth?: AuthContext): Promise<FinalReport> {
-  const { type, results } = await orchestrate(question, auth);
+  const { type, results, routeMeta, gatewayMeta } = await orchestrate(question, auth);
   const analytics = runAnalytics(results);
-  return generateReport({
+  const report = generateReport({
     question,
     type,
     dispatchResults: results,
     analytics,
     generatedAt: new Date().toISOString(),
   });
+  report.usage = [
+    ...(routeMeta.modelUsage ?? []),
+    ...(gatewayMeta.modelUsage ?? []),
+    ...results.flatMap((r) => validModelUsage(r.meta?.modelUsage)),
+  ];
+  return report;
 }
 
 /** Produce the final report via the Bedrock Flow, falling back to local on failure. */
@@ -430,6 +439,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
         error: `${inputScreen.outcome}: ${inputScreen.reasons.join(", ") || "policy"}`,
         errorKind: "guardrail",
         trace: guardrailTrace(inputScreen, []),
+        usage: [],
         sections: [],
       });
       return respond(status, { ok: false, error: body, traceId: trace });
@@ -469,6 +479,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
         error: `${outputScreen.outcome}: ${outputScreen.reasons.join(", ") || "policy"}`,
         errorKind: "guardrail",
         trace: guardrailTrace(inputScreen, report.trace ?? [], outputScreen),
+        usage: report.usage ?? [],
         sections: [],
       });
       return respond(status, { ok: false, error: body, traceId: trace });
@@ -498,6 +509,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
       rows: sections.reduce((a, s) => a + s.rows, 0),
       hadFile,
       trace: report.trace ?? [],
+      usage: report.usage ?? [],
       sections,
       kb: digestKb(report),
     });
@@ -519,6 +531,7 @@ export const handler = async (event: AskEvent): Promise<APIGatewayProxyResultV2>
       error: `${e.code}: ${e.message}`,
       errorKind: "http",
       trace: [],
+      usage: [],
       sections: [],
     });
     return respond(e.statusCode, { ok: false, error: `${e.code}: ${e.message}`, traceId: trace });

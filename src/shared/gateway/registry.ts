@@ -18,6 +18,7 @@ import { createLogger } from "../logger.js";
 import { assertEgressAllowed } from "./egress.js";
 import { hasDatabase, query } from "../pg.js";
 import { embedText, toVectorLiteral } from "../kb.js";
+import type { ModelUsage } from "../types.js";
 import { parseOpenApi } from "./openapi.js";
 import {
   operationSearchText,
@@ -199,8 +200,12 @@ export async function removeBackend(backendId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-async function retrievePostgres(queryText: string, topK: number): Promise<OperationMatch[]> {
-  const embedding = await embedText(queryText);
+async function retrievePostgres(
+  queryText: string,
+  topK: number,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<OperationMatch[]> {
+  const embedding = await embedText(queryText, onUsage, "gateway-retrieval-embedding");
   const rows = await query<{
     backend_id: string;
     backend_name: string;
@@ -243,11 +248,15 @@ function retrieveInMemory(queryText: string, topK: number): OperationMatch[] {
  * configured (best-effort: a Bedrock/DB failure degrades to lexical over the in-memory catalog), else
  * lexical scoring over the in-memory registry. Returns [] when nothing is registered/matches.
  */
-export async function retrieveOperations(queryText: string, topK = DEFAULT_TOP_K): Promise<OperationMatch[]> {
+export async function retrieveOperations(
+  queryText: string,
+  topK = DEFAULT_TOP_K,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<OperationMatch[]> {
   const k = topK > 0 ? Math.min(topK, 20) : DEFAULT_TOP_K;
   if (hasDatabase()) {
     try {
-      return await retrievePostgres(queryText, k);
+      return await retrievePostgres(queryText, k, onUsage);
     } catch (err) {
       log.warn("pgvector gateway retrieval failed; falling back to in-memory catalog", { error: String(err) });
     }

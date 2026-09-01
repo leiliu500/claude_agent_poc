@@ -23,6 +23,7 @@ import { extractParams } from "./router.js";
 import { extractLastJsonObject } from "./supervisor-parse.js";
 import { converseText, postDispatchModelConfigured } from "./postdispatch/agent.js";
 import { createLogger } from "./logger.js";
+import type { ModelUsage } from "./types.js";
 // The routing instruction lives as editable Markdown prose (loaded raw via the esbuild `.md` text
 // loader / vitest md plugin), NOT inline — same convention as supervisor.md/gateway.md and the
 // post-dispatch overlays. The dynamic MENU (buildMenu) is data and stays in code.
@@ -82,7 +83,10 @@ function toTask(raw: LlmTask, question: string): TaskRequest | undefined {
  * Route a question with the LLM. Returns a validated RoutingDecision, or undefined to signal the caller
  * to fall back to the deterministic router (disabled, model failure, no JSON, or no valid task).
  */
-export async function llmRoute(question: string): Promise<RoutingDecision | undefined> {
+export async function llmRoute(
+  question: string,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<RoutingDecision | undefined> {
   if (!llmRouterEnabled()) return undefined;
 
   let raw: string;
@@ -90,6 +94,8 @@ export async function llmRoute(question: string): Promise<RoutingDecision | unde
     raw = await converseText(SYSTEM, `BUSINESS USE-CASE MENU:\n${buildMenu()}\n\nQUESTION: ${question}`, {
       maxTokens: MAX_TOKENS,
       timeoutMs: TIMEOUT_MS,
+      operation: "route",
+      onUsage,
     });
   } catch (err) {
     log.warn("llm router call failed; deterministic fallback", { error: String(err) });

@@ -182,6 +182,17 @@ export interface AgentStep {
   latencyMs?: number;
 }
 
+/** Metered tokens from one real foundation-model invocation. */
+export interface ModelUsage {
+  model: string;
+  operation: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Estimated on-demand inference cost in US dollars; absent when the model has no configured rate. */
+  costUsd?: number;
+}
+
 /** The final report returned to the user (Flow node 2 output). */
 export interface FinalReport {
   reportId: string;
@@ -197,6 +208,8 @@ export interface FinalReport {
   routing: Pick<RoutingDecision, "type" | "requiresOrchestration" | "rationale">;
   /** Ordered execution path (router → dispatch → post-dispatch agents) for the UI's agent-trace panel. */
   trace?: AgentStep[];
+  /** Metered model calls attributable to this request, including embeddings and flow-agent calls. */
+  usage?: ModelUsage[];
 }
 
 export interface ReportSection {

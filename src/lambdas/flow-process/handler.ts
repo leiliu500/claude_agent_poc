@@ -20,6 +20,7 @@
  * Output (to FlowOutput): FinalReport.
  */
 import type { AgentStep, AgentType, AuthContext, DispatchResult, FinalReport } from "../../shared/types.js";
+import { validModelUsage } from "../../shared/model-usage.js";
 import { readFlowInputs } from "../../shared/flow-io.js";
 import { orchestrate, type GatewayMeta, type RouteMeta } from "../../shared/orchestrator.js";
 import { runAnalytics } from "../../shared/analytics.js";
@@ -162,7 +163,11 @@ export const handler = async (event: unknown): Promise<FinalReport> => {
     // runs next. Fedline spawns ephemeral analytics → report agents (app-specific prompts); SCP
     // (passthrough) and KB return `undefined` here and keep the deterministic report. Bounded +
     // fault-tolerant: any timeout/failure also degrades to the deterministic report.
-    const post = await runPostDispatch({ question, results, analytics });
+    const postUsage: NonNullable<FinalReport["usage"]> = [];
+    const post = await runPostDispatch(
+      { question, results, analytics },
+      (usage) => postUsage.push(usage),
+    );
 
     const trace = buildTrace(routeMeta, gatewayMeta, results, post);
     const report = generateReport({
@@ -175,6 +180,12 @@ export const handler = async (event: unknown): Promise<FinalReport> => {
       trace,
       generatedAt: new Date().toISOString(),
     });
+    report.usage = [
+      ...(routeMeta.modelUsage ?? []),
+      ...(gatewayMeta.modelUsage ?? []),
+      ...results.flatMap((r) => validModelUsage(r.meta?.modelUsage)),
+      ...postUsage,
+    ];
     log.info("process completed", {
       type,
       routedBy: routeMeta.engine,

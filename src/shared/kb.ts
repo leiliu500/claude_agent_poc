@@ -19,6 +19,8 @@
  */
 import { createLogger } from "./logger.js";
 import { hasDatabase, query } from "./pg.js";
+import { modelUsage as toModelUsage } from "./model-usage.js";
+import type { ModelUsage } from "./types.js";
 
 const log = createLogger({ mod: "kb" });
 
@@ -52,6 +54,8 @@ export interface KbAnswer {
   citations: string[];
   /** Which backend served the retrieval. */
   source: "postgres" | "memory";
+  /** Model invocations attributable to this query (embedding and optional generation). */
+  modelUsage: ModelUsage[];
 }
 
 // ── In-memory corpus (the no-database path — mirrors what would be ingested to pgvector) ──
@@ -187,13 +191,26 @@ async function bedrock(): Promise<{ client: BedrockRuntimeLike; Cmd: new (input:
  * (retrieval) and chunk embeddings (ingestion) so the vector spaces match. Throws on failure so the
  * caller can decide whether to fall back (retrieval) or fail the ingest.
  */
-export async function embedText(text: string): Promise<number[]> {
+export async function embedText(
+  text: string,
+  onUsage?: (usage: ModelUsage) => void,
+  operation = "embedding",
+): Promise<number[]> {
   const { client, Cmd } = await bedrock();
   const body = JSON.stringify({ inputText: text, dimensions: KB_EMBED_DIM, normalize: true });
   const res = await client.send(
     new Cmd({ modelId: KB_EMBED_MODEL, contentType: "application/json", accept: "application/json", body }),
   );
-  const parsed = JSON.parse(new TextDecoder().decode(res.body)) as { embedding?: number[] };
+  const parsed = JSON.parse(new TextDecoder().decode(res.body)) as {
+    embedding?: number[];
+    inputTextTokenCount?: number;
+  };
+  const usage = toModelUsage(KB_EMBED_MODEL, operation, {
+    inputTokens: parsed.inputTextTokenCount,
+    outputTokens: 0,
+    totalTokens: parsed.inputTextTokenCount,
+  });
+  if (usage) onUsage?.(usage);
   if (!Array.isArray(parsed.embedding)) throw new Error("Bedrock embedding response had no 'embedding' array");
   return parsed.embedding;
 }
@@ -203,8 +220,12 @@ export function toVectorLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
-async function retrievePostgres(queryText: string, topK: number): Promise<KbPassage[]> {
-  const embedding = await embedText(queryText);
+async function retrievePostgres(
+  queryText: string,
+  topK: number,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<KbPassage[]> {
+  const embedding = await embedText(queryText, onUsage, "kb-retrieval-embedding");
   const rows = await query<{
     doc_id: string;
     title: string;
@@ -252,7 +273,11 @@ function extractiveAnswer(queryText: string, passages: KbPassage[]): string {
 }
 
 /** Optional Bedrock-synthesised answer, strictly grounded in the retrieved passages. */
-async function generatedAnswer(queryText: string, passages: KbPassage[]): Promise<string> {
+async function generatedAnswer(
+  queryText: string,
+  passages: KbPassage[],
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<string> {
   const context = passages
     .map((p, i) => `[${i + 1}] ${p.title}\n${p.content}`)
     .join("\n\n");
@@ -272,7 +297,10 @@ async function generatedAnswer(queryText: string, passages: KbPassage[]): Promis
   );
   const parsed = JSON.parse(new TextDecoder().decode(res.body)) as {
     output?: { message?: { content?: Array<{ text?: string }> } };
+    usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
   };
+  const usage = toModelUsage(KB_GEN_MODEL, "kb-answer-generation", parsed.usage);
+  if (usage) onUsage?.(usage);
   const text = parsed.output?.message?.content?.map((c) => c.text ?? "").join("").trim();
   return text || extractiveAnswer(queryText, passages);
 }
@@ -294,10 +322,11 @@ export async function runKbQuery(input: KbQueryInput): Promise<KbAnswer> {
 
   let passages: KbPassage[] = [];
   let source: KbAnswer["source"] = "memory";
+  const modelUsage: ModelUsage[] = [];
 
   if (hasDatabase()) {
     try {
-      passages = await retrievePostgres(queryText, topK);
+      passages = await retrievePostgres(queryText, topK, (usage) => modelUsage.push(usage));
       source = "postgres";
     } catch (err) {
       log.warn("pgvector retrieval failed; falling back to in-memory corpus", { error: String(err) });
@@ -310,7 +339,7 @@ export async function runKbQuery(input: KbQueryInput): Promise<KbAnswer> {
   let answer: string;
   if (KB_GENERATE && passages.length > 0) {
     try {
-      answer = await generatedAnswer(queryText, passages);
+      answer = await generatedAnswer(queryText, passages, (usage) => modelUsage.push(usage));
     } catch (err) {
       log.warn("Bedrock generation failed; using extractive answer", { error: String(err) });
       answer = extractiveAnswer(queryText, passages);
@@ -319,7 +348,7 @@ export async function runKbQuery(input: KbQueryInput): Promise<KbAnswer> {
     answer = extractiveAnswer(queryText, passages);
   }
 
-  return { answer, passages, citations: citationsOf(passages), source };
+  return { answer, passages, citations: citationsOf(passages), source, modelUsage };
 }
 
 /** Test seam: drop the cached Bedrock client so env changes take effect. */

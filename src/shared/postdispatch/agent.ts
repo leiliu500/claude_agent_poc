@@ -13,7 +13,9 @@
  * and fall back to the deterministic report if a model call is slow or fails.
  */
 import { createLogger } from "../logger.js";
+import { modelUsage as toModelUsage } from "../model-usage.js";
 import type { PostDispatchAgentSpec } from "../gateway/types.js";
+import type { ModelUsage } from "../types.js";
 
 const log = createLogger({ mod: "postdispatch-agent" });
 
@@ -30,6 +32,7 @@ const MAX_TOKENS = Number(process.env.POSTDISPATCH_MAX_TOKENS ?? "600");
 // FOUNDATION_MODEL the flow uses without hand-writing each model's native InvokeModel body.
 interface ConverseResponse {
   output?: { message?: { content?: Array<{ text?: string }> } };
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 }
 interface BedrockRuntimeLike {
   send(cmd: unknown, options?: unknown): Promise<ConverseResponse>;
@@ -64,7 +67,13 @@ export function postDispatchModelConfigured(): boolean {
 export async function converseText(
   system: string,
   user: string,
-  opts: { modelId?: string; maxTokens?: number; timeoutMs?: number } = {},
+  opts: {
+    modelId?: string;
+    maxTokens?: number;
+    timeoutMs?: number;
+    operation?: string;
+    onUsage?: (usage: ModelUsage) => void;
+  } = {},
 ): Promise<string> {
   const modelId = opts.modelId ?? POSTDISPATCH_MODEL;
   if (!modelId) throw new Error("No model configured (set POSTDISPATCH_MODEL or FOUNDATION_MODEL).");
@@ -78,6 +87,8 @@ export async function converseText(
     }),
     { abortSignal: AbortSignal.timeout(opts.timeoutMs ?? AGENT_TIMEOUT_MS) },
   );
+  const usage = toModelUsage(modelId, opts.operation ?? "converse", res.usage);
+  if (usage) opts.onUsage?.(usage);
   return (res.output?.message?.content?.map((c) => c.text ?? "").join("") ?? "").trim();
 }
 
@@ -86,8 +97,16 @@ export async function converseText(
  * context is the user turn; return the model's text. Bounded by AGENT_TIMEOUT_MS. Throws on failure so
  * the pipeline can fall back to the deterministic report.
  */
-export async function runDynamicAgent(spec: PostDispatchAgentSpec, context: unknown): Promise<string> {
-  const text = await converseText(spec.prompt, `Context (JSON):\n${JSON.stringify(context)}`, { modelId: spec.model });
+export async function runDynamicAgent(
+  spec: PostDispatchAgentSpec,
+  context: unknown,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<string> {
+  const text = await converseText(spec.prompt, `Context (JSON):\n${JSON.stringify(context)}`, {
+    modelId: spec.model,
+    operation: `postdispatch-${spec.role}`,
+    onUsage,
+  });
   if (!text) throw new Error(`Post-dispatch ${spec.role} agent returned empty text`);
   log.info("dynamic agent completed", { role: spec.role, chars: text.length });
   return text;

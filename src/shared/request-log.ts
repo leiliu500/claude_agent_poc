@@ -14,7 +14,7 @@
  */
 import { hasDatabase, query } from "./pg.js";
 import { createLogger } from "./logger.js";
-import type { AgentStep } from "./types.js";
+import type { AgentStep, ModelUsage } from "./types.js";
 
 const log = createLogger({ mod: "request-log" });
 
@@ -56,6 +56,8 @@ export interface RequestLogRecord {
   error?: string;
   errorKind?: string;
   trace: AgentStep[];
+  /** Exact model token counters and invocation-time estimated costs for this request. */
+  usage?: ModelUsage[];
   sections: RequestLogSection[];
   kb?: RequestLogKb;
 }
@@ -83,6 +85,7 @@ interface Row {
   error: string | null;
   error_kind: string | null;
   trace: AgentStep[] | null;
+  usage: ModelUsage[] | null;
   sections: RequestLogSection[] | null;
   kb: RequestLogKb | null;
 }
@@ -101,7 +104,7 @@ export async function appendRequestLog(rec: RequestLogInput): Promise<boolean> {
     await query(
       `SELECT fedline.log_request(
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-         $16::jsonb, $17::jsonb, $18::jsonb
+         $16::jsonb, $17::jsonb, $18::jsonb, $19::jsonb
        )`,
       [
         rec.traceId ?? null,
@@ -120,6 +123,7 @@ export async function appendRequestLog(rec: RequestLogInput): Promise<boolean> {
         rec.error ? rec.error.slice(0, MAX_ERROR) : null,
         rec.errorKind ?? null,
         JSON.stringify(rec.trace ?? []),
+        JSON.stringify(rec.usage ?? []),
         JSON.stringify(rec.sections ?? []),
         rec.kb ? JSON.stringify(rec.kb) : null,
       ],
@@ -162,6 +166,7 @@ export async function readRequestLog(opts: {
     error: r.error ?? undefined,
     errorKind: r.error_kind ?? undefined,
     trace: r.trace ?? [],
+    usage: r.usage ?? [],
     sections: r.sections ?? [],
     kb: r.kb ?? undefined,
   }));
