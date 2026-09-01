@@ -14,7 +14,7 @@
  * always returns a document within the HTTP sync deadline. GATEWAY_MOCK forces the deterministic path
  * so tests / local mode stay hermetic (no Bedrock).
  */
-import type { AgentStep, AnalyticsResult, DispatchResult } from "../types.js";
+import type { AgentStep, AnalyticsResult, DispatchResult, ModelUsage } from "../types.js";
 import { createLogger } from "../logger.js";
 import { getBackend } from "../gateway/registry.js";
 import { postDispatchModelConfigured, runDynamicAgent } from "./agent.js";
@@ -44,6 +44,8 @@ export interface PostDispatchOutput {
   backendId: string;
   /** Per-agent execution-path steps (analytics, report) for the UI's trace panel. */
   steps: AgentStep[];
+  /** Exact Bedrock token counters for the ephemeral agent calls. */
+  modelUsage: ModelUsage[];
 }
 
 /** Model id a post-dispatch agent runs on (spec override, else the configured default). */
@@ -129,12 +131,18 @@ async function runAgents(
   input: PostDispatchInput,
   gw: DispatchResult,
   op?: BackendOperation,
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<PostDispatchOutput> {
   const backendId = String(gw.meta.backendId);
   const operationId = operationIdOf(gw);
   const analyticsSpec = agents.find((a) => a.role === "analytics");
   const reportSpec = agents.find((a) => a.role === "report");
   const steps: AgentStep[] = [];
+  const modelUsage: ModelUsage[] = [];
+  const captureUsage = (usage: ModelUsage) => {
+    modelUsage.push(usage);
+    onUsage?.(usage);
+  };
 
   // 1) Ephemeral analytics agent: derive insights over the rows + trusted rollups. The base prompt is
   //    specialized to the invoked operation (per-operation overlay) for the length of this one call.
@@ -142,7 +150,7 @@ async function runAgents(
   if (analyticsSpec) {
     const spec = { ...analyticsSpec, prompt: composePrompt(analyticsSpec, operationId, op) };
     const t0 = performance.now();
-    const raw = await runDynamicAgent(spec, buildContext(input, gw));
+    const raw = await runDynamicAgent(spec, buildContext(input, gw), captureUsage);
     insights = parseInsights(raw);
     steps.push({
       stage: "analytics", agent: "Analytics agent", engine: "llm", status: "ran",
@@ -157,7 +165,11 @@ async function runAgents(
   if (reportSpec) {
     const spec = { ...reportSpec, prompt: composePrompt(reportSpec, operationId, op) };
     const t0 = performance.now();
-    summary = (await runDynamicAgent(spec, buildContext(input, gw, insights))).trim() || undefined;
+    summary = (await runDynamicAgent(
+      spec,
+      buildContext(input, gw, insights),
+      captureUsage,
+    )).trim() || undefined;
     steps.push({
       stage: "report", agent: "Report agent", engine: "llm", status: "ran",
       model: reportSpec.model ?? POST_MODEL, detail: summary ? "summary written" : "no summary",
@@ -165,7 +177,7 @@ async function runAgents(
     });
   }
 
-  return { summary, insights, backendId, steps };
+  return { summary, insights, backendId, steps, modelUsage };
 }
 
 /** Reject if the agent sequence outruns the budget, so the caller degrades within the HTTP deadline. */
@@ -190,7 +202,10 @@ function withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
  * policy is passthrough/absent, no Gateway result is present, agents are disabled, or anything fails —
  * in every `undefined` case the caller keeps its existing deterministic analytics+report behavior.
  */
-export async function runPostDispatch(input: PostDispatchInput): Promise<PostDispatchOutput | undefined> {
+export async function runPostDispatch(
+  input: PostDispatchInput,
+  onUsage?: (usage: ModelUsage) => void,
+): Promise<PostDispatchOutput | undefined> {
   const gw = primaryGatewayResult(input.results);
   if (!gw) return undefined; // not a Gateway dispatch → unchanged deterministic path
 
@@ -214,7 +229,7 @@ export async function runPostDispatch(input: PostDispatchInput): Promise<PostDis
   }
 
   try {
-    const out = await withBudget(runAgents(policy.agents, input, gw, op), BUDGET_MS);
+    const out = await withBudget(runAgents(policy.agents, input, gw, op, onUsage), BUDGET_MS);
     log.info("post-dispatch agents completed", { backendId, insights: out.insights.length, hasSummary: Boolean(out.summary) });
     return out;
   } catch (err) {

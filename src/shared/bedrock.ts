@@ -13,6 +13,7 @@ import {
 import type { AuthContext, FinalReport } from "./types.js";
 import { UpstreamError } from "./errors.js";
 import { createLogger } from "./logger.js";
+import { AgentTraceUsageCollector, validModelUsage } from "./model-usage.js";
 
 const log = createLogger({ mod: "bedrock" });
 
@@ -74,6 +75,8 @@ export async function invokeFlow(args: {
   const cmd = new InvokeFlowCommand({
     flowIdentifier: args.flowId,
     flowAliasIdentifier: args.flowAliasId,
+    // Flow dependency traces contain the supervisor agent's exact input/output token counters.
+    enableTrace: true,
     inputs: [
       {
         nodeName: "FlowInput",
@@ -94,6 +97,8 @@ export async function invokeFlow(args: {
     const resp = await client().send(cmd, abortSignal ? { abortSignal } : {});
     if (!resp.responseStream) throw new UpstreamError("Flow returned no response stream");
     let doc: unknown;
+    const flowUsage = [];
+    const usageCollector = new AgentTraceUsageCollector();
     for await (const event of resp.responseStream) {
       if (event.flowOutputEvent?.content?.document !== undefined) {
         doc = event.flowOutputEvent.content.document;
@@ -101,9 +106,13 @@ export async function invokeFlow(args: {
       if (event.flowCompletionEvent) {
         log.debug("flow completed", { status: event.flowCompletionEvent.completionReason });
       }
+      const agentParts = event.flowTraceEvent?.trace?.nodeDependencyTrace?.traceElements?.agentTraces ?? [];
+      for (const part of agentParts) flowUsage.push(...usageCollector.accept(part));
     }
     if (doc === undefined) throw new UpstreamError("Flow produced no output document");
-    return (typeof doc === "string" ? JSON.parse(doc) : doc) as FinalReport;
+    const report = (typeof doc === "string" ? JSON.parse(doc) : doc) as FinalReport;
+    report.usage = [...validModelUsage(report.usage), ...flowUsage];
+    return report;
   } catch (err) {
     log.error("invokeFlow failed", { error: String(err) });
     throw err instanceof UpstreamError ? err : new UpstreamError(`InvokeFlow failed: ${String(err)}`);

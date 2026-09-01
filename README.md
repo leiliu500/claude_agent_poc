@@ -221,6 +221,12 @@ model works — e.g. `anthropic.claude-3-5-sonnet-20240620-v1:0`). A swap is **o
 terraform apply -var "foundation_model=<new-model-id>"
 ```
 
+The dashboard records Bedrock-reported input/output tokens for each request and an estimated USD
+cost at invocation time. When changing model, region, service tier, or pricing agreement, also set
+`foundation_model_input_price_per_million` and `foundation_model_output_price_per_million` to the
+effective rates. Token counts remain available if a model is unpriced; the dashboard labels those
+tokens as unpriced instead of treating them as free.
+
 Why it's not just an attribute change: an agent `live` **alias** serves a versioned snapshot of the
 *prepared* DRAFT, not the DRAFT config. So the apply does three things automatically:
 

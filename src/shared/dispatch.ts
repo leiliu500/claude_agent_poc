@@ -76,6 +76,7 @@ export async function executeTask(task: TaskRequest): Promise<DispatchResult> {
           query: task.params.query ?? "",
           matched: kb.passages.length,
           retrieval: kb.source,
+          modelUsage: kb.modelUsage,
         },
         latencyMs: hrMs() - start,
       };

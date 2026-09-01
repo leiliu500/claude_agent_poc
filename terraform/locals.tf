@@ -14,6 +14,18 @@ locals {
     "arn:${local.partition}:bedrock:${local.region}:${local.account_id}:inference-profile/*",
   ]
 
+  # Captured with every token observation so the dashboard can aggregate historical USD estimates.
+  # Values are configurable because Bedrock pricing varies by region/tier and negotiated agreement.
+  model_pricing_env = {
+    FOUNDATION_MODEL = var.foundation_model
+    MODEL_PRICING_JSON = jsonencode({
+      (var.foundation_model) = {
+        input  = var.foundation_model_input_price_per_million
+        output = var.foundation_model_output_price_per_million
+      }
+    })
+  }
+
   # Collaborator agents. The former per-domain Fedline collaborators (EDD, XShipReport,
   # XShipDownload, Relationship) have been RETIRED: Fedline is now a runtime-registered backend of the
   # Agentic API Gateway (see src/shared/gateway/seed.ts), reached through the single Gateway

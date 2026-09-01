@@ -491,8 +491,9 @@ ON CONFLICT (user_id, id_type) DO UPDATE
 -- is derived or estimated here — the dashboard aggregates these rows, so a value that
 -- was not observed stays NULL rather than defaulting to zero.
 --
--- The three JSONB columns mirror the shapes in src/shared/types.ts:
+-- The JSONB columns mirror the shapes in src/shared/types.ts:
 --   trace    -> AgentStep[]        (stage, agent, engine, status, model, confidence, latencyMs)
+--   usage    -> ModelUsage[]       (model, operation, input/output/total tokens, estimated USD cost)
 --   sections -> per-section digest (useCase, rows, endpoint, httpMethod, backend)
 --   kb       -> RAG provenance     (retrieval, matched, citations)
 -- They are stored whole rather than normalised into child tables: they are read back
@@ -519,9 +520,13 @@ CREATE TABLE IF NOT EXISTS fedline.request_log (
     error         TEXT,
     error_kind    TEXT,                    -- http | network | timeout | auth
     trace         JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    usage         JSONB       NOT NULL DEFAULT '[]'::jsonb,
     sections      JSONB       NOT NULL DEFAULT '[]'::jsonb,
     kb            JSONB
 );
+
+-- Idempotent upgrade for request logs created before token metering was introduced.
+ALTER TABLE fedline.request_log ADD COLUMN IF NOT EXISTS usage JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 -- The dashboard always reads a time window, newest first — this index serves every query it makes.
 CREATE INDEX IF NOT EXISTS request_log_occurred_idx
@@ -532,6 +537,11 @@ CREATE INDEX IF NOT EXISTS request_log_user_occurred_idx
 
 -- Append one observation. All-defaults arguments keep the call site tolerant of a partial
 -- record (a network failure, for instance, has no http_status and no report).
+-- Remove the prior 18-argument overload during an in-place upgrade.
+DROP FUNCTION IF EXISTS fedline.log_request(
+    TEXT, TEXT, TEXT, TEXT, BOOLEAN, INT, INT, TEXT, TEXT, BOOLEAN, INT, BOOLEAN,
+    TEXT, TEXT, TEXT, JSONB, JSONB, JSONB
+);
 CREATE OR REPLACE FUNCTION fedline.log_request(
     p_trace_id      TEXT,
     p_user_ref      TEXT,
@@ -549,6 +559,7 @@ CREATE OR REPLACE FUNCTION fedline.log_request(
     p_error         TEXT,
     p_error_kind    TEXT,
     p_trace         JSONB,
+    p_usage         JSONB,
     p_sections      JSONB,
     p_kb            JSONB
 ) RETURNS BIGINT
@@ -557,13 +568,14 @@ AS $$
     INSERT INTO fedline.request_log (
         trace_id, user_ref, user_name, question, ok, http_status, latency_ms,
         report_type, report_id, orchestrated, rows_returned, had_file, export_format,
-        error, error_kind, trace, sections, kb
+        error, error_kind, trace, usage, sections, kb
     ) VALUES (
         p_trace_id, p_user_ref, p_user_name, COALESCE(p_question, ''), p_ok, p_http_status,
         COALESCE(p_latency_ms, 0), p_report_type, p_report_id, p_orchestrated,
         COALESCE(p_rows_returned, 0), COALESCE(p_had_file, false), p_export_format,
         p_error, p_error_kind,
-        COALESCE(p_trace, '[]'::jsonb), COALESCE(p_sections, '[]'::jsonb), p_kb
+        COALESCE(p_trace, '[]'::jsonb), COALESCE(p_usage, '[]'::jsonb),
+        COALESCE(p_sections, '[]'::jsonb), p_kb
     )
     RETURNING request_id;
 $$;
@@ -571,7 +583,9 @@ $$;
 -- Read a window of observations, newest first. The dashboard aggregates client-side over the
 -- SAME record shape it builds locally, so one aggregation layer serves both sources.
 -- p_user_ref NULL ⇒ every user (the deployment-wide view).
-CREATE OR REPLACE FUNCTION fedline.read_request_log(
+-- PostgreSQL cannot change a table-returning function's row type in place.
+DROP FUNCTION IF EXISTS fedline.read_request_log(TIMESTAMPTZ, TIMESTAMPTZ, INT, TEXT);
+CREATE FUNCTION fedline.read_request_log(
     p_from     TIMESTAMPTZ,
     p_to       TIMESTAMPTZ,
     p_limit    INT DEFAULT 1000,
@@ -581,7 +595,7 @@ RETURNS TABLE (
     request_id BIGINT, occurred_at TIMESTAMPTZ, trace_id TEXT, user_ref TEXT, user_name TEXT,
     question TEXT, ok BOOLEAN, http_status INT, latency_ms INT, report_type TEXT, report_id TEXT,
     orchestrated BOOLEAN, rows_returned INT, had_file BOOLEAN, export_format TEXT,
-    error TEXT, error_kind TEXT, trace JSONB, sections JSONB, kb JSONB
+    error TEXT, error_kind TEXT, trace JSONB, usage JSONB, sections JSONB, kb JSONB
 )
 LANGUAGE sql
 STABLE
@@ -589,7 +603,7 @@ AS $$
     SELECT rl.request_id, rl.occurred_at, rl.trace_id, rl.user_ref, rl.user_name,
            rl.question, rl.ok, rl.http_status, rl.latency_ms, rl.report_type, rl.report_id,
            rl.orchestrated, rl.rows_returned, rl.had_file, rl.export_format,
-           rl.error, rl.error_kind, rl.trace, rl.sections, rl.kb
+           rl.error, rl.error_kind, rl.trace, rl.usage, rl.sections, rl.kb
     FROM   fedline.request_log rl
     WHERE  rl.occurred_at >= p_from
     AND    rl.occurred_at <  p_to

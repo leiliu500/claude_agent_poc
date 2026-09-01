@@ -16,6 +16,7 @@ import { converseText, postDispatchModelConfigured } from "../postdispatch/agent
 import { extractLastJsonObject } from "../supervisor-parse.js";
 import { createLogger } from "../logger.js";
 import type { OperationMatch } from "./types.js";
+import type { ModelUsage } from "../types.js";
 
 const log = createLogger({ mod: "gateway-agent" });
 
@@ -65,12 +66,13 @@ function candidateMenu(cands: OperationMatch[]): string {
 export async function discoverOperation(
   question: string,
   identifiers: Record<string, string>,
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<GatewayDiscovery | undefined> {
   const start = performance.now();
 
   let candidates: OperationMatch[];
   try {
-    candidates = await retrieveOperations(question, TOP_K);
+    candidates = await retrieveOperations(question, TOP_K, onUsage);
   } catch (err) {
     log.warn("gateway retrieve failed; no discovery", { error: String(err) });
     return undefined;
@@ -95,7 +97,7 @@ export async function discoverOperation(
     raw = await converseText(
       gatewayPrompt.trim(),
       `CANDIDATES:\n${candidateMenu(candidates)}\n\nQUESTION: ${question}`,
-      { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS },
+      { maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS, operation: "gateway-selection", onUsage },
     );
   } catch (err) {
     log.warn("gateway agent call failed; top-candidate fallback", { error: String(err) });

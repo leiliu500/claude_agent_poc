@@ -22,6 +22,28 @@ variable "foundation_model" {
   default     = "openai.gpt-oss-120b-1:0"
 }
 
+variable "foundation_model_input_price_per_million" {
+  description = "Estimated USD price per 1M input tokens for foundation_model. Override for your region, tier, or negotiated rate."
+  type        = number
+  default     = 0.15
+
+  validation {
+    condition     = var.foundation_model_input_price_per_million >= 0
+    error_message = "foundation_model_input_price_per_million must be non-negative."
+  }
+}
+
+variable "foundation_model_output_price_per_million" {
+  description = "Estimated USD price per 1M output tokens for foundation_model. Override for your region, tier, or negotiated rate."
+  type        = number
+  default     = 0.60
+
+  validation {
+    condition     = var.foundation_model_output_price_per_million >= 0
+    error_message = "foundation_model_output_price_per_million must be non-negative."
+  }
+}
+
 variable "orchestration_mode" {
   description = "api-entrypoint mode: 'agent' (use Bedrock supervisor agent) or 'local' (deterministic in-process)."
   type        = string
