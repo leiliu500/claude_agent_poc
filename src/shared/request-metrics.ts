@@ -31,6 +31,12 @@ export interface MetricsTotals {
   fallbacks: number;
   rowsReturned: number;
   orchestrated: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  /** Tokens from model ids without a configured price; costUsd is only the known-cost subtotal. */
+  unpricedTokens: number;
 }
 
 /** One time bucket of the current window. `medianMs`/`p95Ms` are null when the bucket is empty. */
@@ -44,6 +50,11 @@ export interface MetricsBucket {
   rowsReturned: number;
   modelInvocations: number;
   successRate: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  unpricedTokens: number;
 }
 
 export interface MetricsPayload {
@@ -57,7 +68,18 @@ export interface MetricsPayload {
   /** Steps that actually executed (ran + fallback) — the denominator for the engine mix. */
   stepsExecuted: number;
   stages: Array<{ stage: string; avgMs: number | null; steps: number }>;
-  models: Array<{ model: string; steps: number; avgConfidence: number | null; medianMs: number | null }>;
+  models: Array<{
+    model: string;
+    steps: number;
+    calls: number;
+    avgConfidence: number | null;
+    medianMs: number | null;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    costUsd: number;
+    unpricedTokens: number;
+  }>;
   useCases: Array<{ useCase: string; rows: number; calls: number }>;
   operations: Array<{ method: string | null; path: string; backend: string | null; calls: number; rows: number }>;
   kb: { answers: number; avgMatched: number | null; avgCitations: number | null; stores: Array<{ store: string; n: number }> };
@@ -81,6 +103,12 @@ export interface MetricsRow {
   errorKind: string | null;
   steps: number;
   llmSteps: number;
+  modelCalls: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  unpricedTokens: number;
 }
 
 /** Rows returned for the two row-level cards. Bounded, so they cannot grow with the window. */
@@ -116,7 +144,8 @@ tagged AS (
      AND (p.user_ref IS NULL OR r.user_ref = p.user_ref)
 ),
 steps AS (
-  SELECT g.w,
+  SELECT g.w, g.request_id,
+         jsonb_array_length(COALESCE(g.usage, '[]'::jsonb)) > 0 AS has_usage,
          e->>'stage'  AS stage,
          e->>'engine' AS engine,
          e->>'status' AS status,
@@ -124,6 +153,16 @@ steps AS (
          CASE WHEN jsonb_typeof(e->'confidence') = 'number' THEN (e->>'confidence')::double precision END AS confidence,
          CASE WHEN jsonb_typeof(e->'latencyMs')  = 'number' THEN (e->>'latencyMs')::double precision  END AS latency_ms
     FROM tagged g, LATERAL jsonb_array_elements(COALESCE(g.trace, '[]'::jsonb)) e
+),
+usage AS (
+  SELECT g.w, g.request_id,
+         NULLIF(e->>'model', '') AS model,
+         NULLIF(e->>'operation', '') AS operation,
+         COALESCE(CASE WHEN jsonb_typeof(e->'inputTokens')  = 'number' THEN (e->>'inputTokens')::bigint  END, 0) AS input_tokens,
+         COALESCE(CASE WHEN jsonb_typeof(e->'outputTokens') = 'number' THEN (e->>'outputTokens')::bigint END, 0) AS output_tokens,
+         COALESCE(CASE WHEN jsonb_typeof(e->'totalTokens')  = 'number' THEN (e->>'totalTokens')::bigint  END, 0) AS total_tokens,
+         CASE WHEN jsonb_typeof(e->'costUsd') = 'number' THEN (e->>'costUsd')::double precision END AS cost_usd
+    FROM tagged g, LATERAL jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e
 ),
 secs AS (
   SELECT g.w,
@@ -149,9 +188,18 @@ tot AS (
 ),
 step_tot AS (
   SELECT s.w,
-         count(*) FILTER (WHERE s.engine = 'llm' AND s.status = 'ran') AS model_invocations,
+         count(*) FILTER (WHERE NOT s.has_usage AND s.engine = 'llm' AND s.status = 'ran') AS legacy_model_invocations,
          count(*) FILTER (WHERE s.status = 'fallback')                 AS fallbacks
     FROM steps s GROUP BY s.w
+),
+usage_tot AS (
+  SELECT u.w, count(*) AS calls,
+         COALESCE(sum(u.input_tokens), 0) AS input_tokens,
+         COALESCE(sum(u.output_tokens), 0) AS output_tokens,
+         COALESCE(sum(u.total_tokens), 0) AS total_tokens,
+         COALESCE(sum(u.cost_usd), 0) AS cost_usd,
+         COALESCE(sum(u.total_tokens) FILTER (WHERE u.cost_usd IS NULL), 0) AS unpriced_tokens
+    FROM usage u GROUP BY u.w
 ),
 -- Bucket index by arithmetic rather than generate_series, so a window that does not divide evenly
 -- cannot produce an off-by-one extra bucket. LEAST() pins the right edge into the last bucket.
@@ -159,15 +207,25 @@ binned AS (
   SELECT LEAST(p.nb - 1,
                GREATEST(0, floor(extract(epoch FROM (g.occurred_at - p.f))
                                  / NULLIF(extract(epoch FROM (p.t - p.f)) / p.nb, 0))::int)) AS idx,
-         g.ok, g.latency_ms, g.rows_returned, g.request_id
+         g.ok, g.latency_ms, g.rows_returned, g.request_id, g.trace, g.usage
     FROM tagged g, p WHERE g.w = 'cur'
 ),
 bin_steps AS (
   SELECT b.idx, count(*) FILTER (WHERE s.engine = 'llm' AND s.status = 'ran') AS model_invocations
     FROM binned b
-    JOIN tagged g ON g.request_id = b.request_id AND g.w = 'cur'
-    JOIN LATERAL jsonb_array_elements(COALESCE(g.trace, '[]'::jsonb)) e ON TRUE
+    JOIN LATERAL jsonb_array_elements(COALESCE(b.trace, '[]'::jsonb)) e ON TRUE
     JOIN LATERAL (SELECT e->>'engine' AS engine, e->>'status' AS status) s ON TRUE
+   WHERE jsonb_array_length(COALESCE(b.usage, '[]'::jsonb)) = 0
+   GROUP BY b.idx
+),
+bin_usage AS (
+  SELECT b.idx, count(*) AS calls,
+         COALESCE(sum(CASE WHEN jsonb_typeof(e->'inputTokens') = 'number' THEN (e->>'inputTokens')::bigint ELSE 0 END), 0) AS input_tokens,
+         COALESCE(sum(CASE WHEN jsonb_typeof(e->'outputTokens') = 'number' THEN (e->>'outputTokens')::bigint ELSE 0 END), 0) AS output_tokens,
+         COALESCE(sum(CASE WHEN jsonb_typeof(e->'totalTokens') = 'number' THEN (e->>'totalTokens')::bigint ELSE 0 END), 0) AS total_tokens,
+         COALESCE(sum(CASE WHEN jsonb_typeof(e->'costUsd') = 'number' THEN (e->>'costUsd')::double precision ELSE 0 END), 0) AS cost_usd,
+         COALESCE(sum(CASE WHEN jsonb_typeof(e->'costUsd') IS DISTINCT FROM 'number' AND jsonb_typeof(e->'totalTokens') = 'number' THEN (e->>'totalTokens')::bigint ELSE 0 END), 0) AS unpriced_tokens
+    FROM binned b, LATERAL jsonb_array_elements(COALESCE(b.usage, '[]'::jsonb)) e
    GROUP BY b.idx
 ),
 axis AS (SELECT generate_series(0, (SELECT nb FROM p) - 1) AS idx),
@@ -180,10 +238,16 @@ series AS (
          percentile_cont(0.5)  WITHIN GROUP (ORDER BY b.latency_ms) FILTER (WHERE b.latency_ms > 0) AS median_ms,
          percentile_cont(0.95) WITHIN GROUP (ORDER BY b.latency_ms) FILTER (WHERE b.latency_ms > 0) AS p95_ms,
          COALESCE(sum(b.rows_returned), 0)                 AS rows_returned,
-         COALESCE(max(bs.model_invocations), 0)            AS model_invocations
+         COALESCE(max(bs.model_invocations), 0) + COALESCE(max(bu.calls), 0) AS model_invocations,
+         COALESCE(max(bu.input_tokens), 0) AS input_tokens,
+         COALESCE(max(bu.output_tokens), 0) AS output_tokens,
+         COALESCE(max(bu.total_tokens), 0) AS total_tokens,
+         COALESCE(max(bu.cost_usd), 0) AS cost_usd,
+         COALESCE(max(bu.unpriced_tokens), 0) AS unpriced_tokens
     FROM axis a
     LEFT JOIN binned b   ON b.idx = a.idx
     LEFT JOIN bin_steps bs ON bs.idx = a.idx
+    LEFT JOIN bin_usage bu ON bu.idx = a.idx
    GROUP BY a.idx
 ),
 routing AS (
@@ -204,12 +268,28 @@ stages AS (
    WHERE s.w = 'cur' AND s.status <> 'skipped' AND s.stage IS NOT NULL AND s.latency_ms IS NOT NULL
    GROUP BY s.stage
 ),
-models AS (
+trace_models AS (
   SELECT s.model,
          count(*) AS steps,
+         count(*) FILTER (WHERE NOT s.has_usage AND s.engine = 'llm' AND s.status = 'ran') AS legacy_calls,
          avg(s.confidence) AS avg_confidence,
          percentile_cont(0.5) WITHIN GROUP (ORDER BY s.latency_ms) FILTER (WHERE s.latency_ms IS NOT NULL) AS median_ms
     FROM steps s WHERE s.w = 'cur' AND s.status <> 'skipped' AND s.model IS NOT NULL GROUP BY s.model
+),
+usage_models AS (
+  SELECT u.model, count(*) AS calls,
+         sum(u.input_tokens) AS input_tokens, sum(u.output_tokens) AS output_tokens,
+         sum(u.total_tokens) AS total_tokens, COALESCE(sum(u.cost_usd), 0) AS cost_usd,
+         COALESCE(sum(u.total_tokens) FILTER (WHERE u.cost_usd IS NULL), 0) AS unpriced_tokens
+    FROM usage u WHERE u.w = 'cur' AND u.model IS NOT NULL GROUP BY u.model
+),
+models AS (
+  SELECT COALESCE(tm.model, um.model) AS model, COALESCE(tm.steps, 0) AS steps,
+         COALESCE(um.calls, 0) + COALESCE(tm.legacy_calls, 0) AS calls, tm.avg_confidence, tm.median_ms,
+         COALESCE(um.input_tokens, 0) AS input_tokens, COALESCE(um.output_tokens, 0) AS output_tokens,
+         COALESCE(um.total_tokens, 0) AS total_tokens, COALESCE(um.cost_usd, 0) AS cost_usd,
+         COALESCE(um.unpriced_tokens, 0) AS unpriced_tokens
+    FROM trace_models tm FULL OUTER JOIN usage_models um ON um.model = tm.model
 ),
 -- Total executed steps, so the mix's own denominator comes from the same filter as its segments.
 step_exec AS (
@@ -248,7 +328,20 @@ row_base AS (
          (SELECT count(*) FROM jsonb_array_elements(COALESCE(g.trace, '[]'::jsonb)) e2
            WHERE e2->>'status' = 'ran') AS steps,
          (SELECT count(*) FROM jsonb_array_elements(COALESCE(g.trace, '[]'::jsonb)) e3
-           WHERE e3->>'engine' = 'llm' AND e3->>'status' = 'ran') AS llm_steps
+           WHERE e3->>'engine' = 'llm' AND e3->>'status' = 'ran') AS llm_steps,
+         COALESCE(NULLIF(jsonb_array_length(COALESCE(g.usage, '[]'::jsonb)), 0),
+           (SELECT count(*) FROM jsonb_array_elements(COALESCE(g.trace, '[]'::jsonb)) e4
+             WHERE e4->>'engine' = 'llm' AND e4->>'status' = 'ran')) AS model_calls,
+         (SELECT COALESCE(sum(CASE WHEN jsonb_typeof(e5->'inputTokens') = 'number' THEN (e5->>'inputTokens')::bigint ELSE 0 END), 0)
+            FROM jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e5) AS input_tokens,
+         (SELECT COALESCE(sum(CASE WHEN jsonb_typeof(e6->'outputTokens') = 'number' THEN (e6->>'outputTokens')::bigint ELSE 0 END), 0)
+            FROM jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e6) AS output_tokens,
+         (SELECT COALESCE(sum(CASE WHEN jsonb_typeof(e7->'totalTokens') = 'number' THEN (e7->>'totalTokens')::bigint ELSE 0 END), 0)
+            FROM jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e7) AS total_tokens,
+         (SELECT COALESCE(sum(CASE WHEN jsonb_typeof(e8->'costUsd') = 'number' THEN (e8->>'costUsd')::double precision ELSE 0 END), 0)
+            FROM jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e8) AS cost_usd,
+         (SELECT COALESCE(sum(CASE WHEN jsonb_typeof(e9->'costUsd') IS DISTINCT FROM 'number' AND jsonb_typeof(e9->'totalTokens') = 'number' THEN (e9->>'totalTokens')::bigint ELSE 0 END), 0)
+            FROM jsonb_array_elements(COALESCE(g.usage, '[]'::jsonb)) e9) AS unpriced_tokens
     FROM tagged g WHERE g.w = 'cur'
 ),
 row_json AS (
@@ -258,7 +351,10 @@ row_json AS (
            'userName', rb.user_name, 'question', rb.question, 'ok', rb.ok,
            'httpStatus', rb.http_status, 'latencyMs', rb.latency_ms, 'type', rb.report_type,
            'rows', rb.rows_returned, 'error', rb.error, 'errorKind', rb.error_kind,
-           'steps', rb.steps, 'llmSteps', rb.llm_steps) AS j
+           'steps', rb.steps, 'llmSteps', rb.llm_steps, 'modelCalls', rb.model_calls,
+           'inputTokens', rb.input_tokens, 'outputTokens', rb.output_tokens,
+           'totalTokens', rb.total_tokens, 'costUsd', rb.cost_usd,
+           'unpricedTokens', rb.unpriced_tokens) AS j
     FROM row_base rb
 )
 SELECT jsonb_build_object(
@@ -271,27 +367,42 @@ SELECT jsonb_build_object(
   'totals', (SELECT to_jsonb(x) FROM (
       SELECT COALESCE(t.requests, 0) AS "requests", COALESCE(t.succeeded, 0) AS "succeeded",
              COALESCE(t.failed, 0) AS "failed", t.median_ms AS "medianMs", t.p95_ms AS "p95Ms",
-             COALESCE(st.model_invocations, 0) AS "modelInvocations", COALESCE(st.fallbacks, 0) AS "fallbacks",
-             COALESCE(t.rows_returned, 0) AS "rowsReturned", COALESCE(t.orchestrated, 0) AS "orchestrated"
+             COALESCE(ut.calls, 0) + COALESCE(st.legacy_model_invocations, 0) AS "modelInvocations",
+             COALESCE(st.fallbacks, 0) AS "fallbacks",
+             COALESCE(t.rows_returned, 0) AS "rowsReturned", COALESCE(t.orchestrated, 0) AS "orchestrated",
+             COALESCE(ut.input_tokens, 0) AS "inputTokens", COALESCE(ut.output_tokens, 0) AS "outputTokens",
+             COALESCE(ut.total_tokens, 0) AS "totalTokens", COALESCE(ut.cost_usd, 0) AS "costUsd",
+             COALESCE(ut.unpriced_tokens, 0) AS "unpricedTokens"
         FROM (SELECT 1) _
-        LEFT JOIN tot t ON t.w = 'cur' LEFT JOIN step_tot st ON st.w = 'cur') x),
+        LEFT JOIN tot t ON t.w = 'cur' LEFT JOIN step_tot st ON st.w = 'cur'
+        LEFT JOIN usage_tot ut ON ut.w = 'cur') x),
   'prev', (SELECT to_jsonb(x) FROM (
       SELECT t.requests AS "requests", t.succeeded AS "succeeded", t.failed AS "failed",
              t.median_ms AS "medianMs", t.p95_ms AS "p95Ms",
-             COALESCE(st.model_invocations, 0) AS "modelInvocations", COALESCE(st.fallbacks, 0) AS "fallbacks",
-             t.rows_returned AS "rowsReturned", t.orchestrated AS "orchestrated"
-        FROM tot t LEFT JOIN step_tot st ON st.w = t.w WHERE t.w = 'prv') x),
+             COALESCE(ut.calls, 0) + COALESCE(st.legacy_model_invocations, 0) AS "modelInvocations",
+             COALESCE(st.fallbacks, 0) AS "fallbacks",
+             t.rows_returned AS "rowsReturned", t.orchestrated AS "orchestrated",
+             COALESCE(ut.input_tokens, 0) AS "inputTokens", COALESCE(ut.output_tokens, 0) AS "outputTokens",
+             COALESCE(ut.total_tokens, 0) AS "totalTokens", COALESCE(ut.cost_usd, 0) AS "costUsd",
+             COALESCE(ut.unpriced_tokens, 0) AS "unpricedTokens"
+        FROM tot t LEFT JOIN step_tot st ON st.w = t.w LEFT JOIN usage_tot ut ON ut.w = t.w WHERE t.w = 'prv') x),
   'series', COALESCE((SELECT jsonb_agg(jsonb_build_object(
       't', s.t_ms::bigint, 'total', s.total, 'ok', s.ok, 'failed', s.failed,
       'medianMs', s.median_ms, 'p95Ms', s.p95_ms, 'rowsReturned', s.rows_returned,
       'modelInvocations', s.model_invocations,
+      'inputTokens', s.input_tokens, 'outputTokens', s.output_tokens, 'totalTokens', s.total_tokens,
+      'costUsd', s.cost_usd, 'unpricedTokens', s.unpriced_tokens,
       'successRate', CASE WHEN s.total > 0 THEN (s.ok::double precision / s.total) * 100 END
     ) ORDER BY s.idx) FROM series s), '[]'::jsonb),
   'routing', COALESCE((SELECT jsonb_agg(jsonb_build_object('type', type, 'n', n) ORDER BY n DESC, type) FROM routing), '[]'::jsonb),
   'engines', COALESCE((SELECT jsonb_agg(jsonb_build_object('engine', engine, 'steps', steps) ORDER BY steps DESC) FROM engines), '[]'::jsonb),
   'stepsExecuted', (SELECT executed FROM step_exec),
   'stages',  COALESCE((SELECT jsonb_agg(jsonb_build_object('stage', stage, 'avgMs', avg_ms, 'steps', steps) ORDER BY avg_ms DESC NULLS LAST) FROM stages), '[]'::jsonb),
-  'models',  COALESCE((SELECT jsonb_agg(jsonb_build_object('model', model, 'steps', steps, 'avgConfidence', avg_confidence, 'medianMs', median_ms) ORDER BY steps DESC) FROM models), '[]'::jsonb),
+  'models',  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'model', model, 'steps', steps, 'calls', calls, 'avgConfidence', avg_confidence, 'medianMs', median_ms,
+      'inputTokens', input_tokens, 'outputTokens', output_tokens, 'totalTokens', total_tokens,
+      'costUsd', cost_usd, 'unpricedTokens', unpriced_tokens
+    ) ORDER BY total_tokens DESC, calls DESC) FROM models), '[]'::jsonb),
   'useCases',COALESCE((SELECT jsonb_agg(jsonb_build_object('useCase', use_case, 'rows', rows, 'calls', calls) ORDER BY rows DESC, use_case) FROM use_cases), '[]'::jsonb),
   'operations', COALESCE((SELECT jsonb_agg(jsonb_build_object('method', method, 'path', path, 'backend', backend, 'calls', calls, 'rows', rows) ORDER BY calls DESC, rows DESC, path) FROM operations), '[]'::jsonb),
   'kb', jsonb_build_object(

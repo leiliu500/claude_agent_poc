@@ -32,10 +32,16 @@ const state: {
 
 const emptyPayload = (a: AggArgs, requests: number): MetricsPayload => ({
   window: { from: +a.from, to: +a.to, prevFrom: a.prevFrom ? +a.prevFrom : null, prevTo: a.prevTo ? +a.prevTo : null, buckets: a.buckets },
-  totals: { requests, succeeded: requests, failed: 0, medianMs: null, p95Ms: null, modelInvocations: 0, fallbacks: 0, rowsReturned: 0, orchestrated: 0 },
+  totals: {
+    requests, succeeded: requests, failed: 0, medianMs: null, p95Ms: null,
+    modelInvocations: 0, fallbacks: 0, rowsReturned: 0, orchestrated: 0,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, unpricedTokens: 0,
+  },
   prev: null,
   series: Array.from({ length: a.buckets }, (_, i) => ({
-    t: +a.from + i, total: 0, ok: 0, failed: 0, medianMs: null, p95Ms: null, rowsReturned: 0, modelInvocations: 0, successRate: null,
+    t: +a.from + i, total: 0, ok: 0, failed: 0, medianMs: null, p95Ms: null,
+    rowsReturned: 0, modelInvocations: 0, successRate: null,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, unpricedTokens: 0,
   })),
   routing: [], engines: [], stepsExecuted: 0, stages: [], models: [], useCases: [], operations: [],
   kb: { answers: 0, avgMatched: null, avgCitations: null, stores: [] },

@@ -16,7 +16,7 @@
  * deterministic fallback. The real Bedrock supervisor performs the same steps via the DBAgent and
  * collaborator agents; this is the reference implementation and the test seam.
  */
-import type { AgentType, AuthContext, DispatchResult, RoutingDecision, TaskParams, TaskRequest } from "./types.js";
+import type { AgentType, AuthContext, DispatchResult, ModelUsage, RoutingDecision, TaskParams, TaskRequest } from "./types.js";
 import { route, extractParams } from "./router.js";
 import { llmRoute } from "./llm-router.js";
 import { executeTask } from "./dispatch.js";
@@ -37,6 +37,7 @@ export interface RouteMeta {
   model?: string;
   latencyMs: number;
   useCases: string[];
+  modelUsage?: ModelUsage[];
 }
 
 /** Whether the Layer-2 gateway discovery agent ran for this request — surfaced in the trace. */
@@ -51,6 +52,7 @@ export interface GatewayMeta {
   /** The agent's confidence, or the top retrieval relevance score on the fallback (0..1). */
   score?: number;
   latencyMs?: number;
+  modelUsage?: ModelUsage[];
 }
 
 export interface OrchestrationResult {
@@ -293,7 +295,8 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   // deterministic keyword router is the safety net. This is what makes routing genuinely agentic
   // instead of always falling through to regex — every LLM miss/fallback is logged in llm-router.
   const routeStart = performance.now();
-  const llm = await llmRoute(question);
+  const routeUsage: ModelUsage[] = [];
+  const llm = await llmRoute(question, (usage) => routeUsage.push(usage));
   const decision: RoutingDecision = llm ?? route(question);
   const routedBy = llm ? "llm" : "deterministic";
   const routeMeta: RouteMeta = {
@@ -302,6 +305,7 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
     model: routedBy === "llm" ? ROUTER_MODEL : undefined,
     latencyMs: Math.round(performance.now() - routeStart),
     useCases: decision.tasks.map((t) => t.useCase),
+    modelUsage: routeUsage,
   };
 
   // Layer 2 — Gateway discovery AGENT (gateway.md). For a single-operation APPLICATION request (not a
@@ -311,9 +315,10 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
   // KB and multi-task requests keep the Layer-1 task list (preserving the KB path and the EDD
   // summary→detail / "and export" chains). When the registry has nothing to match (e.g. local/tests),
   // discovery returns undefined and we fall through to the Layer-1 tasks too.
-  let gatewayMeta: GatewayMeta = { ran: false };
+  const gatewayUsage: ModelUsage[] = [];
+  let gatewayMeta: GatewayMeta = { ran: false, modelUsage: gatewayUsage };
   if (decision.type !== "KB" && decision.tasks.length === 1) {
-    const disc = await discoverOperation(question, identifiers);
+    const disc = await discoverOperation(question, identifiers, (usage) => gatewayUsage.push(usage));
     if (disc) {
       const spec = getUseCase(disc.operationId);
       const type: AgentType = spec?.type ?? "Gateway";
@@ -329,6 +334,7 @@ export async function orchestrate(question: string, auth?: AuthContext): Promise
         ran: true, engine: disc.engine, model: disc.model,
         backendId: disc.backendId, operationId: disc.operationId,
         score: disc.confidence, latencyMs: disc.latencyMs,
+        modelUsage: gatewayUsage,
       };
       log.info("orchestrating (gateway agent)", {
         userName, backendId: disc.backendId, operationId: disc.operationId, engine: disc.engine, confidence: disc.confidence,

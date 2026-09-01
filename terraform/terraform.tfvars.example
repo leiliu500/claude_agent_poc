@@ -2,6 +2,10 @@
 aws_region         = "us-east-1"
 project_name       = "bedrock-reporting"
 environment        = "dev"
-foundation_model   = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+foundation_model   = "openai.gpt-oss-120b-1:0"
 orchestration_mode = "agent" # or "local" to bypass agents/flow
 log_level          = "info"
+# Token-cost dashboard rates (USD per one million tokens). Set these to the on-demand rate for your
+# Bedrock region/tier, or to your negotiated effective rate.
+# foundation_model_input_price_per_million  = 0.15
+# foundation_model_output_price_per_million = 0.60

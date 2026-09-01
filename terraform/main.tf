@@ -77,7 +77,7 @@ module "lambda_workers" {
     "action-kb" = {
       zip_path               = "${var.dist_dir}/action-kb.zip"
       role_arn               = module.iam.lambda_db_role_arn
-      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env)
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env, local.model_pricing_env)
       vpc_subnet_ids         = local.db_subnet_ids
       vpc_security_group_ids = local.db_sg_ids
       timeout                = var.lambda_timeout_seconds
@@ -90,7 +90,7 @@ module "lambda_workers" {
     "action-gateway" = {
       zip_path               = "${var.dist_dir}/action-gateway.zip"
       role_arn               = module.iam.lambda_db_role_arn
-      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env, local.gateway_lambda_env)
+      environment            = merge({ LOG_LEVEL = var.log_level, BEDROCK_REGION = local.region }, local.db_lambda_env, local.gateway_lambda_env, local.model_pricing_env)
       vpc_subnet_ids         = local.db_subnet_ids
       vpc_security_group_ids = local.db_sg_ids
       timeout                = var.lambda_timeout_seconds
@@ -188,7 +188,7 @@ module "lambda_workers" {
         GATEWAY_AGENT_TIMEOUT_MS      = "20000"
         POSTDISPATCH_BUDGET_MS        = "45000"
         POSTDISPATCH_AGENT_TIMEOUT_MS = "20000"
-      }, local.db_lambda_env)
+      }, local.db_lambda_env, local.model_pricing_env)
       vpc_subnet_ids         = local.db_subnet_ids
       vpc_security_group_ids = local.db_sg_ids
       # ~2 min so the full multi-agent path can complete (the entrypoint's Function URL allows it).
@@ -272,7 +272,7 @@ module "lambda_entrypoint" {
       role_arn = module.iam.lambda_entrypoint_role_arn
       # In the best-practice topology the supervisor agent is a node INSIDE the flow,
       # so the entrypoint only needs to invoke the flow.
-      environment = merge(local.telemetry_entrypoint_env, local.guardrail_entrypoint_env, {
+      environment = merge(local.telemetry_entrypoint_env, local.guardrail_entrypoint_env, local.model_pricing_env, {
         LOG_LEVEL          = var.log_level
         ORCHESTRATION_MODE = var.orchestration_mode
         BEDROCK_REGION     = local.region

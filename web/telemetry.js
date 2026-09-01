@@ -2,10 +2,9 @@
  * Agentic Application Gateway — client-side telemetry store.
  *
  * Every field recorded here is COPIED FROM A REAL RESPONSE (the FinalReport the backend returned,
- * its `trace` of AgentStep records, the HTTP status, and a client-measured round-trip). Nothing is
- * synthesized, estimated or back-filled — a dashboard that invents numbers is worse than no
- * dashboard. When a value is absent from the response it stays absent here, and the dashboard
- * renders an empty state rather than a zero.
+ * its `trace` of AgentStep records, the HTTP status, and a client-measured round-trip). Token counts
+ * are provider-reported; dollar cost is the backend's invocation-time estimate from configured
+ * rates. When a value is absent from the response it stays absent here rather than being back-filled.
  *
  * Scope: this browser. Records live in localStorage as a capped ring buffer, so the dashboard
  * survives reloads and logouts of the same user on the same machine. The server-side equivalent
@@ -74,6 +73,19 @@
     }));
   }
 
+  /** Exact provider-reported token counters and backend-priced cost observations. */
+  function slimUsage(report) {
+    if (!report || !Array.isArray(report.usage)) return [];
+    return report.usage.filter((u) => u && typeof u.model === "string" && typeof u.totalTokens === "number").map((u) => ({
+      model: u.model,
+      operation: u.operation || "model-call",
+      inputTokens: Math.max(0, Number(u.inputTokens) || 0),
+      outputTokens: Math.max(0, Number(u.outputTokens) || 0),
+      totalTokens: Math.max(0, Number(u.totalTokens) || 0),
+      costUsd: typeof u.costUsd === "number" ? Math.max(0, u.costUsd) : undefined,
+    }));
+  }
+
   /** Per-section row counts + use-case identity — the "what did the backends actually return" axis. */
   function slimSections(report) {
     return (report.sections || []).map((sec) => ({
@@ -136,6 +148,7 @@
       rows: sections.reduce((a, s) => a + s.rows, 0),
       sections,
       trace,
+      usage: slimUsage(report),
       kb: kbOf(report),
     };
 
@@ -235,6 +248,16 @@
   /** Every trace step across the given records, flattened. */
   const steps = (records) => records.flatMap((r) => r.trace || []);
 
+  /** Every metered model invocation across the given records, flattened. */
+  const modelUsage = (records) => records.flatMap((r) => r.usage || []);
+
+  /** Metered calls when present, otherwise legacy trace-only calls, evaluated per request. */
+  const modelCallCount = (records) => records.reduce((total, r) => {
+    const usage = r.usage || [];
+    if (usage.length) return total + usage.length;
+    return total + (r.trace || []).filter((s) => s.engine === "llm" && s.status === "ran").length;
+  }, 0);
+
   /** Every report section across the given records, flattened. */
   const allSections = (records) => records.flatMap((r) => r.sections || []);
 
@@ -258,21 +281,33 @@
     rows: r.rows || 0, error: r.error ?? null, errorKind: r.errorKind ?? null,
     steps: (r.trace || []).filter((s) => s.status === "ran").length,
     llmSteps: (r.trace || []).filter((s) => s.engine === "llm" && s.status === "ran").length,
+    modelCalls: (r.usage || []).length || (r.trace || []).filter((s) => s.engine === "llm" && s.status === "ran").length,
+    inputTokens: (r.usage || []).reduce((a, u) => a + (u.inputTokens || 0), 0),
+    outputTokens: (r.usage || []).reduce((a, u) => a + (u.outputTokens || 0), 0),
+    totalTokens: (r.usage || []).reduce((a, u) => a + (u.totalTokens || 0), 0),
+    costUsd: (r.usage || []).reduce((a, u) => a + (typeof u.costUsd === "number" ? u.costUsd : 0), 0),
+    unpricedTokens: (r.usage || []).reduce((a, u) => a + (typeof u.costUsd === "number" ? 0 : (u.totalTokens || 0)), 0),
   });
 
   function totalsOf(recs) {
     const lat = recs.map((r) => r.latencyMs).filter((v) => v > 0);
     const st = steps(recs);
+    const usage = modelUsage(recs);
     return {
       requests: recs.length,
       succeeded: recs.filter((r) => r.ok).length,
       failed: recs.filter((r) => !r.ok).length,
       medianMs: percentile(lat, 0.5),
       p95Ms: percentile(lat, 0.95),
-      modelInvocations: st.filter((s) => s.engine === "llm" && s.status === "ran").length,
+      modelInvocations: modelCallCount(recs),
       fallbacks: st.filter((s) => s.status === "fallback").length,
       rowsReturned: recs.reduce((a, r) => a + (r.rows || 0), 0),
       orchestrated: recs.filter((r) => r.orchestrated).length,
+      inputTokens: usage.reduce((a, u) => a + (u.inputTokens || 0), 0),
+      outputTokens: usage.reduce((a, u) => a + (u.outputTokens || 0), 0),
+      totalTokens: usage.reduce((a, u) => a + (u.totalTokens || 0), 0),
+      costUsd: usage.reduce((a, u) => a + (typeof u.costUsd === "number" ? u.costUsd : 0), 0),
+      unpricedTokens: usage.reduce((a, u) => a + (typeof u.costUsd === "number" ? 0 : (u.totalTokens || 0)), 0),
     };
   }
 
@@ -304,6 +339,7 @@
 
     const series = bucketize(cur, win.from, win.to, win.buckets).map((b) => {
       const lat = b.records.map((r) => r.latencyMs).filter((v) => v > 0);
+      const usage = modelUsage(b.records);
       return {
         t: b.from,
         total: b.records.length,
@@ -312,7 +348,12 @@
         medianMs: percentile(lat, 0.5),
         p95Ms: percentile(lat, 0.95),
         rowsReturned: b.records.reduce((a, r) => a + (r.rows || 0), 0),
-        modelInvocations: steps(b.records).filter((s) => s.engine === "llm" && s.status === "ran").length,
+        modelInvocations: modelCallCount(b.records),
+        inputTokens: usage.reduce((a, u) => a + (u.inputTokens || 0), 0),
+        outputTokens: usage.reduce((a, u) => a + (u.outputTokens || 0), 0),
+        totalTokens: usage.reduce((a, u) => a + (u.totalTokens || 0), 0),
+        costUsd: usage.reduce((a, u) => a + (typeof u.costUsd === "number" ? u.costUsd : 0), 0),
+        unpricedTokens: usage.reduce((a, u) => a + (typeof u.costUsd === "number" ? 0 : (u.totalTokens || 0)), 0),
         successRate: b.records.length ? (b.records.filter((r) => r.ok).length / b.records.length) * 100 : null,
       };
     });
@@ -328,11 +369,30 @@
     const modelMap = new Map();
     for (const s of executed) {
       if (!s.model) continue;
-      const e = modelMap.get(s.model) || { steps: 0, conf: [], ms: [] };
+      const e = modelMap.get(s.model) || { steps: 0, calls: 0, conf: [], ms: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, unpricedTokens: 0 };
       e.steps += 1;
       if (typeof s.confidence === "number") e.conf.push(s.confidence);
       if (typeof s.latencyMs === "number") e.ms.push(s.latencyMs);
       modelMap.set(s.model, e);
+    }
+    for (const u of modelUsage(cur)) {
+      const e = modelMap.get(u.model) || { steps: 0, calls: 0, conf: [], ms: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, unpricedTokens: 0 };
+      e.calls += 1;
+      e.inputTokens += u.inputTokens || 0;
+      e.outputTokens += u.outputTokens || 0;
+      e.totalTokens += u.totalTokens || 0;
+      if (typeof u.costUsd === "number") e.costUsd += u.costUsd;
+      else e.unpricedTokens += u.totalTokens || 0;
+      modelMap.set(u.model, e);
+    }
+    for (const r of cur) {
+      if ((r.usage || []).length) continue;
+      for (const s of r.trace || []) {
+        if (!s.model || s.engine !== "llm" || s.status !== "ran") continue;
+        const e = modelMap.get(s.model) || { steps: 0, calls: 0, conf: [], ms: [], inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0, unpricedTokens: 0 };
+        e.calls += 1;
+        modelMap.set(s.model, e);
+      }
     }
     const opMap = new Map();
     for (const s of secs) {
@@ -359,8 +419,12 @@
         .map(([stage, v]) => ({ stage, avgMs: mean(v.ms), steps: v.steps }))
         .sort((a, b) => (b.avgMs ?? -1) - (a.avgMs ?? -1)),
       models: [...modelMap.entries()]
-        .map(([model, v]) => ({ model, steps: v.steps, avgConfidence: mean(v.conf), medianMs: percentile(v.ms, 0.5) }))
-        .sort((a, b) => b.steps - a.steps),
+        .map(([model, v]) => ({
+          model, steps: v.steps, calls: v.calls, avgConfidence: mean(v.conf),
+          medianMs: percentile(v.ms, 0.5), inputTokens: v.inputTokens, outputTokens: v.outputTokens,
+          totalTokens: v.totalTokens, costUsd: v.costUsd, unpricedTokens: v.unpricedTokens,
+        }))
+        .sort((a, b) => b.totalTokens - a.totalTokens || b.calls - a.calls),
       useCases: [...useMap.entries()]
         .map(([useCase, v]) => ({ useCase, rows: v.sum, calls: v.n }))
         .sort((a, b) => b.rows - a.rows || String(a.useCase).localeCompare(String(b.useCase))),
@@ -394,6 +458,6 @@
     getBacktest,
     clearBacktest,
     aggregateLocal,
-    agg: { inWindow, percentile, countBy, sumBy, bucketize, steps, allSections },
+    agg: { inWindow, percentile, countBy, sumBy, bucketize, steps, modelUsage, modelCallCount, allSections },
   };
 })();

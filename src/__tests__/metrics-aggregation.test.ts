@@ -89,6 +89,40 @@ describe("local aggregation: definitions shared with the SQL producer", () => {
     expect(m.totals.fallbacks).toBe(1);
   });
 
+  it("aggregates provider token counters and estimated cost at system and request level", () => {
+    const usage = [
+      { model: "openai.gpt-oss-120b-1:0", operation: "route", inputTokens: 100, outputTokens: 25, totalTokens: 125, costUsd: 0.00003 },
+      { model: "openai.gpt-oss-120b-1:0", operation: "report", inputTokens: 200, outputTokens: 50, totalTokens: 250, costUsd: 0.00006 },
+    ];
+    const m = T.aggregateLocal([rec({ usage })], win());
+
+    expect(m.totals).toMatchObject({
+      modelInvocations: 2, inputTokens: 300, outputTokens: 75, totalTokens: 375,
+      costUsd: 0.00009, unpricedTokens: 0,
+    });
+    expect(m.series.reduce((n: number, b: any) => n + b.totalTokens, 0)).toBe(375);
+    expect(m.activity[0]).toMatchObject({ modelCalls: 2, inputTokens: 300, outputTokens: 75, totalTokens: 375, costUsd: 0.00009 });
+    expect(m.models).toEqual([expect.objectContaining({
+      model: "openai.gpt-oss-120b-1:0", calls: 2, inputTokens: 300,
+      outputTokens: 75, totalTokens: 375, costUsd: 0.00009,
+    })]);
+  });
+
+  it("keeps unknown-price tokens visible without presenting them as free", () => {
+    const usage = [{ model: "private.model", operation: "route", inputTokens: 80, outputTokens: 20, totalTokens: 100 }];
+    const m = T.aggregateLocal([rec({ usage })], win());
+    expect(m.totals).toMatchObject({ totalTokens: 100, costUsd: 0, unpricedTokens: 100 });
+    expect(m.models[0]).toMatchObject({ model: "private.model", costUsd: 0, unpricedTokens: 100 });
+  });
+
+  it("combines metered calls with legacy trace-only calls in a mixed window", () => {
+    const metered = rec({ usage: [{ model: "m", operation: "route", inputTokens: 8, outputTokens: 2, totalTokens: 10, costUsd: 0.1 }] });
+    const legacy = rec({ trace: [{ model: "m", engine: "llm", status: "ran" }] });
+    const m = T.aggregateLocal([metered, legacy], win());
+    expect(m.totals.modelInvocations).toBe(2);
+    expect(m.models[0]).toMatchObject({ model: "m", calls: 2, totalTokens: 10 });
+  });
+
   it("counts fallback steps as executed in the engine mix", () => {
     // status <> 'skipped'. A fallback step DID execute, so the mix's total and the card's own
     // "N fell back" note are drawn from the same set.

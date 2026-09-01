@@ -11,7 +11,7 @@
  * not fixed in usecases.ts — so it can't reuse makeActionGroupHandler. Runs in the DB VPC to reach
  * pgvector (retrieval) + Bedrock embeddings; outbound proxy calls need the target to be VPC-reachable.
  */
-import type { DispatchResult } from "../../../shared/types.js";
+import type { DispatchResult, ModelUsage } from "../../../shared/types.js";
 import { envelope, parseInput, type BedrockActionEvent, type BedrockActionResponse } from "../../../shared/action-group.js";
 import { coerceParams } from "../../../shared/dispatch.js";
 import { retrieveOperations } from "../../../shared/gateway/registry.js";
@@ -58,7 +58,8 @@ async function handleSubmit(e: GatewaySubmitEvent): Promise<GatewaySubmitResult>
   }
 
   // Find the best-matching operation that actually accepts a file upload.
-  const matches = await retrieveOperations(e.question || "file upload", 5);
+  const modelUsage: ModelUsage[] = [];
+  const matches = await retrieveOperations(e.question || "file upload", 5, (usage) => modelUsage.push(usage));
   const fileOp = matches.find((m) => m.operation.params.some((p) => p.in === "file"));
   if (!fileOp) {
     return { ok: false, error: "No registered file-upload operation matches this request." };
@@ -73,6 +74,7 @@ async function handleSubmit(e: GatewaySubmitEvent): Promise<GatewaySubmitResult>
   };
   log.info("gateway submit", { backendId: fileOp.backendId, operationId: fileOp.operation.operationId, filename: e.file.name, bytes: content.length });
   const result = await invokeBackend({ backendId: fileOp.backendId, operationId: fileOp.operation.operationId, params });
+  result.meta = { ...result.meta, modelUsage: [...modelUsage, ...(Array.isArray(result.meta?.modelUsage) ? result.meta.modelUsage : [])] };
   return { ok: result.status === "ok", result };
 }
 
@@ -91,7 +93,8 @@ export const handler = async (
   if (useCase === "gatewayRetrieve") {
     const q = typeof params.query === "string" ? params.query : "";
     const topK = typeof params.topK === "number" ? params.topK : undefined;
-    const matches = await retrieveOperations(q, topK);
+    const modelUsage: ModelUsage[] = [];
+    const matches = await retrieveOperations(q, topK, (usage) => modelUsage.push(usage));
     return envelope(ev, 200, {
       type: "Gateway",
       useCase: "gatewayRetrieve",
@@ -106,7 +109,7 @@ export const handler = async (
         requiredParams: m.operation.params.filter((p) => p.required).map((p) => p.name),
         score: m.score,
       })),
-      meta: { query: q, matched: matches.length },
+      meta: { query: q, matched: matches.length, modelUsage },
       latencyMs: 0,
     });
   }

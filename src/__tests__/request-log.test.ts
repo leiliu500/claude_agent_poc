@@ -55,6 +55,7 @@ function dbRow(over: Record<string, unknown> = {}) {
     error: null,
     error_kind: null,
     trace: [{ stage: "route", agent: "Routing classifier", engine: "llm", status: "ran", model: "m", confidence: 0.9, latencyMs: 900 }],
+    usage: [{ model: "m", operation: "route", inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.000027 }],
     sections: [{ useCase: "eddSummaryReport", rows: 88, endpoint: "/api/v1/eddSummaryReport", httpMethod: "GET", backend: "fedline" }],
     kb: null,
     ...over,
@@ -74,6 +75,7 @@ describe("request log — read mapping", () => {
       orchestrated: true, rows: 88, hadFile: false, userName: "Lei Liu", traceId: "trace-1",
     });
     expect(rec.trace).toHaveLength(1);
+    expect(rec.usage).toEqual([{ model: "m", operation: "route", inputTokens: 100, outputTokens: 20, totalTokens: 120, costUsd: 0.000027 }]);
     expect(rec.sections[0]).toMatchObject({ useCase: "eddSummaryReport", rows: 88, backend: "fedline" });
   });
 
@@ -82,7 +84,7 @@ describe("request log — read mapping", () => {
     // tell "not observed" from "observed as zero".
     state.rows = [dbRow({
       ok: false, http_status: null, report_type: null, report_id: null, orchestrated: null,
-      rows_returned: 0, error: "TIMEOUT: no response", error_kind: "timeout", trace: null, sections: null, kb: null,
+      rows_returned: 0, error: "TIMEOUT: no response", error_kind: "timeout", trace: null, usage: null, sections: null, kb: null,
     })];
     const rec = (await readRequestLog({ from: new Date(0), to: new Date() }))[0]!;
 
@@ -94,6 +96,7 @@ describe("request log — read mapping", () => {
     expect(rec.errorKind).toBe("timeout");
     // JSONB columns are non-null in the schema, but a defensive null must still land as an array.
     expect(rec.trace).toEqual([]);
+    expect(rec.usage).toEqual([]);
     expect(rec.sections).toEqual([]);
   });
 
@@ -130,14 +133,16 @@ describe("request log — append", () => {
       httpStatus: 200,
       type: "EDD",
       trace: [{ stage: "route", agent: "Routing classifier", engine: "llm", status: "ran" }],
+      usage: [{ model: "m", operation: "route", inputTokens: 10, outputTokens: 2, totalTokens: 12, costUsd: 0.0000019 }],
       sections: [{ useCase: "eddSummaryReport", rows: 12 }],
     });
     const call = state.calls[0]!;
     expect(call.text).toContain("fedline.log_request");
-    // Positions 16/17/18 are trace / sections / kb.
+    // Positions 16/17/18/19 are trace / usage / sections / kb.
     expect(JSON.parse(String(call.values?.[15]))).toHaveLength(1);
-    expect(JSON.parse(String(call.values?.[16]))[0].useCase).toBe("eddSummaryReport");
-    expect(call.values?.[17]).toBeNull();
+    expect(JSON.parse(String(call.values?.[16]))[0].totalTokens).toBe(12);
+    expect(JSON.parse(String(call.values?.[17]))[0].useCase).toBe("eddSummaryReport");
+    expect(call.values?.[18]).toBeNull();
   });
 
   it("truncates an oversized question so one prompt cannot bloat the table", async () => {

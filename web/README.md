@@ -88,9 +88,9 @@ sources:
 The range and source filters live on **Telemetry** only. The sweep has no time axis and no relation
 to them, so putting those controls on the Backtest tab would be a knob that governs nothing.
 
-**Every number is an observation, never an estimate.** Where something was not observed the
-card says so instead of drawing a zero, and a value that is only reachable by hovering does
-not exist — every chart ships a **Table** toggle showing the same data.
+Token counts are provider observations; dollar cost is explicitly labelled as an estimate and is
+calculated from the rates configured when the invocation occurred. Where something was not observed,
+the card says so instead of drawing a zero, and every chart ships a **Table** toggle with the same data.
 
 ### Two producers, one payload
 
@@ -112,8 +112,8 @@ pins the ones that are easy to get wrong on either side:
 
 - percentiles are **linear-interpolated** (`percentile_cont`) over `latencyMs > 0` — a missing
   timing is not an observation of "0 ms";
-- a **model invocation** is `engine='llm' AND status='ran'` — a skipped step never happened, and a
-  fallback step means the model call *failed* and deterministic code answered;
+- a **model invocation** uses the metered usage entries when present and falls back per request to
+  `engine='llm' AND status='ran'` for legacy rows written before token metering;
 - a **fallback step still executed**, so it counts in the engine mix even though it is not a model
   invocation — the mix's total and its "N fell back" note come from the same set;
 - an **empty bucket** has a total of 0 (a real observation: no requests) but a null latency (no
@@ -133,16 +133,16 @@ is a browser-side signal only — the download happens in the client.
 ### Telemetry tab — sections
 
 - **Hero + KPIs** — requests in range, success rate, median/p95 response, model invocations,
-  rows returned, each with a delta against the immediately preceding window of equal length
+  rows returned, tokens consumed and estimated model cost, each with a delta against the immediately preceding window of equal length
   (omitted, not faked, when there is no comparable prior window).
 - **Agent operations** — request volume, response time, routing by agent type, execution
   engine mix (model call vs deterministic vs HTTP proxy), latency by pipeline stage, and
-  foundation-model usage.
+  foundation-model usage, input/output token history and estimated cost.
 - **Backends & reports** — rows by use case, the concrete HTTP operations called, knowledge-base
   retrieval and its store, export/upload activity.
 - **System health** — endpoint and session state, and recent failures.
-- **Live activity** — the most recent requests; a row whose exchange is still in this browser's
-  chat opens it and highlights it.
+- **Live activity** — the most recent requests with per-request tokens, model calls and estimated
+  cost; a row whose exchange is still in this browser's chat opens it and highlights it.
 
 ### Backtest tab
 
